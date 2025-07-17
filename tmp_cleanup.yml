@@ -1,0 +1,167 @@
+---
+- name: "Limpieza automática de /tmp en nodos del cluster"
+  hosts: all
+  gather_facts: yes
+  vars:
+    threshold: 30
+    auto_mode: true
+    
+  tasks:
+    - name: "Verificar conectividad del nodo"
+      ping:
+      
+    - name: "Obtener información del nodo"
+      setup:
+        gather_subset:
+          - 'hardware'
+          - 'network'
+    
+    - name: "Verificar si /tmp tiene loop device"
+      shell: mount | grep -q 'loop.*on /tmp'
+      register: has_loop_device
+      failed_when: false
+      changed_when: false
+      
+    - name: "Saltear nodos con loop device"
+      debug:
+        msg: "{{ inventory_hostname }} tiene loop device, no necesita limpieza"
+      when: has_loop_device.rc == 0
+      
+    - name: "Verificar uso actual de /tmp"
+      shell: df /tmp | tail -1 | awk '{print $5}' | sed 's/%//'
+      register: tmp_usage
+      when: has_loop_device.rc != 0
+      
+    - name: "Mostrar uso actual de /tmp"
+      debug:
+        msg: "Uso actual de /tmp en {{ inventory_hostname }}: {{ tmp_usage.stdout }}%"
+      when: has_loop_device.rc != 0
+        
+    - name: "Contar archivos a limpiar"
+      shell: |
+        find /tmp -type f -mtime +1 \
+          ! -path "/tmp/systemd-*" \
+          ! -path "/tmp/.font-unix*" \
+          ! -path "/tmp/.ICE-unix*" \
+          ! -path "/tmp/.Test-unix*" \
+          ! -path "/tmp/.X11-unix*" \
+          ! -path "/tmp/.XIM-unix*" \
+          ! -path "/tmp/snap-private-tmp*" \
+          2>/dev/null | wc -l
+      register: files_to_clean
+      when: has_loop_device.rc != 0
+      
+    - name: "Contar directorios a limpiar"
+      shell: |
+        find /tmp -type d -mtime +1 \
+          ! -path "/tmp/systemd-*" \
+          ! -path "/tmp/.font-unix*" \
+          ! -path "/tmp/.ICE-unix*" \
+          ! -path "/tmp/.Test-unix*" \
+          ! -path "/tmp/.X11-unix*" \
+          ! -path "/tmp/.XIM-unix*" \
+          ! -path "/tmp/snap-private-tmp*" \
+          ! -path "/tmp" \
+          2>/dev/null | wc -l
+      register: dirs_to_clean
+      when: has_loop_device.rc != 0
+      
+    - name: "Calcular espacio a liberar"
+      shell: |
+        find /tmp -mtime +1 \
+          ! -path "/tmp/systemd-*" \
+          ! -path "/tmp/.font-unix*" \
+          ! -path "/tmp/.ICE-unix*" \
+          ! -path "/tmp/.Test-unix*" \
+          ! -path "/tmp/.X11-unix*" \
+          ! -path "/tmp/.XIM-unix*" \
+          ! -path "/tmp/snap-private-tmp*" \
+          ! -path "/tmp" \
+          -exec du -sk {} \; 2>/dev/null | awk '{sum += $1} END {printf "%.2f", sum/1024}'
+      register: space_to_free
+      when: has_loop_device.rc != 0 and (files_to_clean.stdout|int > 0 or dirs_to_clean.stdout|int > 0)
+      
+    - name: "Mostrar estadísticas de limpieza"
+      debug:
+        msg: |
+          📋 Archivos detectados para limpieza: {{ files_to_clean.stdout }}
+          📁 Directorios detectados para limpieza: {{ dirs_to_clean.stdout }}
+          📦 Espacio aproximado a liberar: {{ space_to_free.stdout | default('0') }}MB
+      when: has_loop_device.rc != 0 and (files_to_clean.stdout|int > 0 or dirs_to_clean.stdout|int > 0)
+      
+    - name: "Verificar jobs corriendo en SLURM"
+      shell: squeue -h -w {{ inventory_hostname }} 2>/dev/null | wc -l
+      register: running_jobs
+      failed_when: false
+      when: has_loop_device.rc != 0 and (files_to_clean.stdout|int > 0 or dirs_to_clean.stdout|int > 0)
+      
+    - name: "Mostrar jobs corriendo"
+      debug:
+        msg: "Jobs corriendo en {{ inventory_hostname }}: {{ running_jobs.stdout }}"
+      when: has_loop_device.rc != 0 and running_jobs is defined
+      
+    - name: "Drainear nodo si hay jobs corriendo"
+      shell: scontrol update NodeName={{ inventory_hostname }} State=DRAIN Reason="Limpieza /tmp automática"
+      when: 
+        - has_loop_device.rc != 0
+        - running_jobs is defined
+        - running_jobs.stdout|int > 0
+        - (files_to_clean.stdout|int > 0 or dirs_to_clean.stdout|int > 0)
+      register: node_drained
+      
+    - name: "Esperar a que terminen los jobs"
+      shell: squeue -h -w {{ inventory_hostname }} 2>/dev/null | wc -l
+      register: current_jobs
+      until: current_jobs.stdout|int == 0
+      retries: 1440  # 12 horas máximo (30 seg * 1440 = 12h)
+      delay: 30
+      when: node_drained is defined and node_drained.changed
+      
+    - name: "Limpiar archivos antiguos de /tmp"
+      shell: |
+        find /tmp -type f -mtime +1 \
+          ! -path "/tmp/systemd-*" \
+          ! -path "/tmp/.font-unix*" \
+          ! -path "/tmp/.ICE-unix*" \
+          ! -path "/tmp/.Test-unix*" \
+          ! -path "/tmp/.X11-unix*" \
+          ! -path "/tmp/.XIM-unix*" \
+          ! -path "/tmp/snap-private-tmp*" \
+          -delete 2>/dev/null
+      when: 
+        - has_loop_device.rc != 0
+        - files_to_clean.stdout|int > 0
+        
+    - name: "Limpiar directorios antiguos de /tmp"
+      shell: |
+        find /tmp -depth -type d -mtime +1 \
+          ! -path "/tmp/systemd-*" \
+          ! -path "/tmp/.font-unix*" \
+          ! -path "/tmp/.ICE-unix*" \
+          ! -path "/tmp/.Test-unix*" \
+          ! -path "/tmp/.X11-unix*" \
+          ! -path "/tmp/.XIM-unix*" \
+          ! -path "/tmp/snap-private-tmp*" \
+          ! -path "/tmp" \
+          -exec rmdir {} \; 2>/dev/null
+      when: 
+        - has_loop_device.rc != 0
+        - dirs_to_clean.stdout|int > 0
+        
+    - name: "Verificar uso final de /tmp"
+      shell: df /tmp | tail -1 | awk '{print $5}' | sed 's/%//'
+      register: final_tmp_usage
+      when: has_loop_device.rc != 0 and (files_to_clean.stdout|int > 0 or dirs_to_clean.stdout|int > 0)
+      
+    - name: "Reactivar nodo si fue draineado"
+      shell: scontrol update NodeName={{ inventory_hostname }} State=RESUME
+      when: node_drained is defined and node_drained.changed
+      
+    - name: "Mostrar resumen final"
+      debug:
+        msg: |
+          ✅ Limpieza completada en {{ inventory_hostname }}
+          📊 Uso de /tmp antes: {{ tmp_usage.stdout }}% → después: {{ final_tmp_usage.stdout | default('N/A') }}%
+          📁 Archivos procesados: {{ files_to_clean.stdout | default('0') }}
+          📁 Directorios procesados: {{ dirs_to_clean.stdout | default('0') }}
+      when: has_loop_device.rc != 0
