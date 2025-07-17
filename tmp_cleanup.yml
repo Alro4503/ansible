@@ -1,6 +1,8 @@
 ---
 - name: "Limpieza automática de /tmp en nodos del cluster"
   hosts: all
+  any_errors_fatal: false  
+  ignore_unreachable: true
   gather_facts: yes
   vars:
     threshold: 30
