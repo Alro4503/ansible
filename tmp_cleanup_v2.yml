@@ -1,0 +1,110 @@
+---
+- name: Limpieza automática de /tmp usando Ansible nativo
+  hosts: compute_nodes
+  become: yes
+  
+  vars:
+    mtime_days: 1
+    systemd_paths:
+      - "/tmp/systemd-*"
+      - "/tmp/.font-unix*"
+      - "/tmp/.ICE-unix*" 
+      - "/tmp/.Test-unix*"
+      - "/tmp/.X11-unix*"
+      - "/tmp/.XIM-unix*"
+      - "/tmp/snap-private-tmp*"
+    
+  tasks:
+    - name: Verificar si /tmp tiene loop device
+      shell: mount | grep 'loop.*on /tmp'
+      register: loop_check
+      failed_when: false
+      changed_when: false
+      
+    - name: Saltar si hay loop device
+      meta: end_host
+      when: loop_check.rc == 0
+      
+    - name: Obtener hostname completo
+      command: hostname -f
+      register: hostname_full
+      changed_when: false
+      
+    - name: Verificar jobs corriendo en SLURM
+      shell: squeue -h -w {{ hostname_full.stdout }} 2>/dev/null | wc -l
+      register: running_jobs
+      changed_when: false
+      failed_when: false
+      
+    - name: Mostrar jobs corriendo
+      shell: squeue -w {{ hostname_full.stdout }}
+      when: running_jobs.stdout|int > 0
+      register: job_list
+      
+    - name: Drainear nodo si hay jobs
+      shell: scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Limpieza /tmp automática"
+      when: running_jobs.stdout|int > 0
+      register: drain_result
+      
+    - name: Esperar a que terminen los jobs
+      shell: squeue -h -w {{ hostname_full.stdout }} 2>/dev/null | wc -l
+      register: jobs_check
+      until: jobs_check.stdout|int == 0
+      retries: 1440  # 12 horas máximo (1440 * 30s)
+      delay: 30
+      when: running_jobs.stdout|int > 0
+      
+    - name: Buscar archivos antiguos para eliminar
+      find:
+        paths: /tmp
+        age: "{{ mtime_days }}d"
+        file_type: file
+        excludes: "{{ systemd_paths }}"
+      register: old_files
+      become: yes
+      
+    - name: Buscar directorios antiguos para eliminar
+      find:
+        paths: /tmp
+        age: "{{ mtime_days }}d"
+        file_type: directory
+        excludes: "{{ systemd_paths + ['/tmp'] }}"
+      register: old_dirs
+      become: yes
+      
+    - name: Mostrar archivos a eliminar
+      debug:
+        msg: "Archivos a eliminar: {{ old_files.matched }}, Directorios: {{ old_dirs.matched }}"
+        
+    - name: Eliminar archivos antiguos
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_files.files }}"
+      when: old_files.matched > 0
+      become: yes
+      
+    - name: Eliminar directorios antiguos (ordenados por profundidad)
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_dirs.files | sort(attribute='path', reverse=true) }}"
+      when: old_dirs.matched > 0
+      become: yes
+      ignore_errors: yes  # Algunos directorios pueden no estar vacíos
+      
+    - name: Reactivar nodo si fue draineado
+      shell: scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
+      when: running_jobs.stdout|int > 0
+      
+    - name: Mostrar uso final de /tmp
+      shell: df -h /tmp
+      register: final_usage
+      
+    - name: Resultado final
+      debug:
+        msg: 
+          - "Limpieza completada en {{ hostname_full.stdout }}"
+          - "Archivos eliminados: {{ old_files.matched }}"
+          - "Directorios eliminados: {{ old_dirs.matched }}"
+          - "Uso final: {{ final_usage.stdout_lines[-1] }}"
