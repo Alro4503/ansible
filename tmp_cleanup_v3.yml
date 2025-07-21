@@ -1,0 +1,205 @@
+---
+- name: Limpieza automática de /tmp usando Ansible nativo
+  hosts: all
+  become: yes
+  
+  vars:
+    ansible_become_exe: "sudo -n"
+    ansible_become_flags: ""
+    mtime_days: 1
+    systemd_paths:
+      - "/tmp/systemd-*"
+      - "/tmp/.font-unix*"
+      - "/tmp/.ICE-unix*" 
+      - "/tmp/.Test-unix*"
+      - "/tmp/.X11-unix*"
+      - "/tmp/.XIM-unix*"
+      - "/tmp/snap-private-tmp*"
+    
+  tasks:
+    - name: Verificar si /tmp tiene loop device
+      shell: mount | grep 'loop.*on /tmp'
+      register: loop_check
+      failed_when: false
+      changed_when: false
+      
+    - name: Saltar si hay loop device
+      meta: end_host
+      when: loop_check.rc == 0
+      
+    - name: Obtener hostname completo
+      command: hostname -f
+      register: hostname_full
+      changed_when: false
+      
+    - name: Verificar si SLURM está disponible
+      shell: which squeue
+      register: slurm_available
+      failed_when: false
+      changed_when: false
+      
+    - name: Verificar jobs corriendo en SLURM
+      shell: squeue -h -w {{ hostname_full.stdout }} 2>/dev/null | wc -l || echo "0"
+      register: running_jobs
+      changed_when: false
+      failed_when: false
+      when: slurm_available.rc == 0
+      
+    - name: Debug salida de jobs
+      debug:
+        msg: "Salida de running_jobs: '{{ running_jobs.stdout | default('no_ejecutado') }}'"
+        
+    - name: Establecer contador de jobs de forma segura
+      set_fact:
+        jobs_count: "{{ (running_jobs.stdout | default('0') | trim | int) if (slurm_available.rc == 0) else 0 }}"
+        
+    - name: Mostrar jobs corriendo
+      shell: squeue -w {{ hostname_full.stdout }}
+      when: 
+        - slurm_available.rc == 0
+        - jobs_count | int > 0
+      register: job_list
+      failed_when: false
+      
+    - name: Saltar limpieza si no hay SLURM
+      debug:
+        msg: "SLURM no disponible, continuando con limpieza directamente"
+      when: slurm_available.rc != 0
+      
+    - name: Saltar limpieza si no hay jobs
+      debug:
+        msg: "No hay jobs corriendo ({{ jobs_count }}), continuando con limpieza directamente"
+      when: 
+        - slurm_available.rc == 0
+        - jobs_count | int == 0
+        
+    - name: Drainear nodo si hay jobs
+      shell: scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Limpieza /tmp automática"
+      when: 
+        - slurm_available.rc == 0
+        - jobs_count | int > 0
+      register: drain_result
+      failed_when: false
+      
+    - name: Esperar a que terminen los jobs (solo si hay jobs)
+      shell: squeue -h -w {{ hostname_full.stdout }} 2>/dev/null | wc -l || echo "0"
+      register: jobs_check
+      until: (jobs_check.stdout | default('0') | trim | int) == 0
+      retries: 1440  # 12 horas máximo (volviendo al original para jobs largos)
+      delay: 30
+      when: 
+        - slurm_available.rc == 0
+        - jobs_count | int > 0
+      failed_when: false
+      
+    - name: Verificar si el timeout se alcanzó
+      debug:
+        msg: "ADVERTENCIA: Timeout alcanzado. Continuando con limpieza. Jobs restantes: {{ jobs_check.stdout | default('desconocido') | trim }}"
+      when: 
+        - slurm_available.rc == 0
+        - jobs_count | int > 0
+        - jobs_check is defined
+        - jobs_check.failed | default(false)
+        
+    - name: Buscar archivos antiguos para eliminar (con filtros mejorados)
+      find:
+        paths: /tmp
+        age: "{{ mtime_days }}d"
+        file_type: file
+        patterns: "*"
+        excludes: "{{ systemd_paths }}"
+        use_regex: false
+      register: old_files
+      become: yes
+      failed_when: false
+      
+    - name: Buscar directorios antiguos para eliminar (con filtros mejorados)
+      find:
+        paths: /tmp
+        age: "{{ mtime_days }}d"
+        file_type: directory
+        patterns: "*"
+        excludes: "{{ systemd_paths + ['.'] }}"
+        use_regex: false
+      register: old_dirs
+      become: yes
+      failed_when: false
+      
+    - name: Filtrar archivos y directorios del sistema
+      set_fact:
+        filtered_files: "{{ old_files.files | default([]) | rejectattr('path', 'match', '.*/systemd-.*') | 
+                          rejectattr('path', 'match', '.*/\\..*-unix.*') | 
+                          rejectattr('path', 'match', '.*/snap-private-tmp.*') | list }}"
+        filtered_dirs: "{{ old_dirs.files | default([]) | rejectattr('path', 'match', '.*/systemd-.*') | 
+                         rejectattr('path', 'match', '.*/\\..*-unix.*') | 
+                         rejectattr('path', 'match', '.*/snap-private-tmp.*') |
+                         rejectattr('path', 'equalto', '/tmp') | list }}"
+        
+    - name: Mostrar archivos a eliminar
+      debug:
+        msg: 
+          - "Archivos a eliminar: {{ filtered_files | length }}"
+          - "Directorios a eliminar: {{ filtered_dirs | length }}"
+          - "Espacio usado en /tmp: {{ ansible_mounts | selectattr('mount', 'equalto', '/tmp') | map(attribute='size_total') | first | default('N/A') }}"
+        
+    - name: Eliminar archivos antiguos (por lotes para evitar timeout)
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ filtered_files[:100] }}"  # Procesar máximo 100 archivos por vez
+      when: filtered_files | length > 0
+      become: yes
+      ignore_errors: yes
+      register: file_deletion
+      
+    - name: Eliminar archivos restantes si hay más de 100
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ filtered_files[100:] }}"
+      when: filtered_files | length > 100
+      become: yes
+      ignore_errors: yes
+      
+    - name: Eliminar directorios antiguos (ordenados por profundidad, por lotes)
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ (filtered_dirs | sort(attribute='path', reverse=true))[:50] }}"  # Max 50 dirs por vez
+      when: filtered_dirs | length > 0
+      become: yes
+      ignore_errors: yes
+      register: dir_deletion
+      
+    - name: Eliminar directorios restantes si hay más de 50
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ (filtered_dirs | sort(attribute='path', reverse=true))[50:] }}"
+      when: filtered_dirs | length > 50
+      become: yes
+      ignore_errors: yes
+      
+    - name: Reactivar nodo si fue draineado y SLURM disponible
+      shell: scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
+      when: 
+        - slurm_available.rc == 0
+        - jobs_count | int > 0
+      failed_when: false
+      
+    - name: Obtener uso final de /tmp
+      shell: df -h /tmp 2>/dev/null || echo "/tmp no disponible"
+      register: final_usage
+      failed_when: false
+      
+    - name: Resultado final
+      debug:
+        msg: 
+          - "=== LIMPIEZA COMPLETADA ==="
+          - "Nodo: {{ hostname_full.stdout }}"
+          - "Archivos procesados: {{ filtered_files | length }}"
+          - "Directorios procesados: {{ filtered_dirs | length }}"
+          - "SLURM disponible: {{ 'Sí' if slurm_available.rc == 0 else 'No' }}"
+          - "Jobs iniciales: {{ jobs_count }}"
+          - "Uso final /tmp: {{ final_usage.stdout_lines[-1] if final_usage.stdout_lines else 'No disponible' }}"
+          - "=== FIN LIMPIEZA ==="
