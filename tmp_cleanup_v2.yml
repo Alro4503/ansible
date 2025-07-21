@@ -1,6 +1,6 @@
 ---
 - name: Limpieza automática de /tmp usando Ansible nativo
-  hosts: "Cluster nodes"
+  hosts: all
   become: yes
   
   vars:
