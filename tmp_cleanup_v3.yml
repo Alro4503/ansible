@@ -1,5 +1,5 @@
 ---
-- name: Limpieza automática de /tmp usando Ansible nativo
+- name: Limpieza automática de /tmp usando Ansible nativo v1
   hosts: all
   become: yes
   gather_facts: no  
