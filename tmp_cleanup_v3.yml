@@ -1,5 +1,5 @@
 ---
-- name: Limpieza automática de /tmp usando Ansible nativo v5
+- name: Limpieza automática de /tmp usando Ansible nativo
   hosts: all
   become: yes
   
@@ -56,52 +56,65 @@
       delay: 30
       when: running_jobs.stdout|int > 0
       
-    - name: Buscar archivos antiguos para eliminar
-      find:
-        paths:
-          - /tmp
-        age: "{{ mtime_days }}d"
-        file_type: file
-        excludes: "{{ systemd_paths }}"
-        patterns: "*"
-      register: old_files_raw
+    - name: Buscar archivos antiguos para eliminar (sin .time)
+      shell: |
+        find /tmp -type f -mtime +{{ mtime_days }} \
+        ! -name "*.time" \
+        ! -path "/tmp/systemd-*" \
+        ! -path "/tmp/.font-unix*" \
+        ! -path "/tmp/.ICE-unix*" \
+        ! -path "/tmp/.Test-unix*" \
+        ! -path "/tmp/.X11-unix*" \
+        ! -path "/tmp/.XIM-unix*" \
+        ! -path "/tmp/snap-private-tmp*" | wc -l
+      register: old_files_count
       become: yes
       
-    - name: Filtrar archivos .time
-      set_fact:
-        old_files:
-          files: "{{ old_files_raw.files | rejectattr('path', 'match', '.*\\.time
+    - name: Eliminar archivos antiguos directamente
+      shell: |
+        find /tmp -type f -mtime +{{ mtime_days }} \
+        ! -name "*.time" \
+        ! -path "/tmp/systemd-*" \
+        ! -path "/tmp/.font-unix*" \
+        ! -path "/tmp/.ICE-unix*" \
+        ! -path "/tmp/.Test-unix*" \
+        ! -path "/tmp/.X11-unix*" \
+        ! -path "/tmp/.XIM-unix*" \
+        ! -path "/tmp/snap-private-tmp*" \
+        -delete
+      register: delete_files_result
+      become: yes
+      when: old_files_count.stdout|int > 0
       
     - name: Buscar directorios antiguos para eliminar
-      find:
-        paths:
-          - /tmp
-        age: "{{ mtime_days }}d"
-        file_type: directory
-        excludes: "{{ systemd_paths + ['/tmp'] }}"
-      register: old_dirs
+      shell: |
+        find /tmp -type d -mtime +{{ mtime_days }} \
+        ! -path "/tmp/systemd-*" \
+        ! -path "/tmp/.font-unix*" \
+        ! -path "/tmp/.ICE-unix*" \
+        ! -path "/tmp/.Test-unix*" \
+        ! -path "/tmp/.X11-unix*" \
+        ! -path "/tmp/.XIM-unix*" \
+        ! -path "/tmp/snap-private-tmp*" \
+        ! -path "/tmp" | wc -l
+      register: old_dirs_count
       become: yes
       
-    - name: Mostrar archivos a eliminar
-      debug:
-        msg: "Archivos a eliminar: {{ old_files.matched }}, Directorios: {{ old_dirs.matched }}"
-        
-    - name: Eliminar archivos antiguos
-      file:
-        path: "{{ item.path }}"
-        state: absent
-      loop: "{{ old_files.files }}"
-      when: old_files.matched > 0
+    - name: Eliminar directorios antiguos
+      shell: |
+        find /tmp -type d -mtime +{{ mtime_days }} \
+        ! -path "/tmp/systemd-*" \
+        ! -path "/tmp/.font-unix*" \
+        ! -path "/tmp/.ICE-unix*" \
+        ! -path "/tmp/.Test-unix*" \
+        ! -path "/tmp/.X11-unix*" \
+        ! -path "/tmp/.XIM-unix*" \
+        ! -path "/tmp/snap-private-tmp*" \
+        ! -path "/tmp" \
+        -exec rmdir {} + 2>/dev/null || true
+      register: delete_dirs_result
       become: yes
-      
-    - name: Eliminar directorios antiguos (ordenados por profundidad)
-      file:
-        path: "{{ item.path }}"
-        state: absent
-      loop: "{{ old_dirs.files | sort(attribute='path', reverse=true) }}"
-      when: old_dirs.matched > 0
-      become: yes
-      ignore_errors: yes  # Algunos directorios pueden no estar vacíos
+      when: old_dirs_count.stdout|int > 0
       
     - name: Reactivar nodo si fue draineado
       shell: scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
@@ -119,107 +132,6 @@
         msg: 
           - "Limpieza completada en {{ hostname_full.stdout }}"
           - "Jobs iniciales: {{ running_jobs.stdout }}"
-          - "Archivos eliminados: {{ old_files.matched }}"
-          - "Directorios eliminados: {{ old_dirs.matched }}"
-          - "Uso final: {{ final_usage.stdout_lines[-1] }}") | list }}"
-          matched: "{{ (old_files_raw.files | rejectattr('path', 'match', '.*\\.time
-      
-    - name: Buscar directorios antiguos para eliminar
-      find:
-        paths: /tmp
-        age: "{{ mtime_days }}d"
-        file_type: directory
-        excludes: "{{ systemd_paths + ['/tmp'] }}"
-      register: old_dirs
-      become: yes
-      
-    - name: Mostrar archivos a eliminar
-      debug:
-        msg: "Archivos a eliminar: {{ old_files.matched }}, Directorios: {{ old_dirs.matched }}"
-        
-    - name: Eliminar archivos antiguos
-      file:
-        path: "{{ item.path }}"
-        state: absent
-      loop: "{{ old_files.files }}"
-      when: old_files.matched > 0
-      become: yes
-      
-    - name: Eliminar directorios antiguos (ordenados por profundidad)
-      file:
-        path: "{{ item.path }}"
-        state: absent
-      loop: "{{ old_dirs.files | sort(attribute='path', reverse=true) }}"
-      when: old_dirs.matched > 0
-      become: yes
-      ignore_errors: yes  # Algunos directorios pueden no estar vacíos
-      
-    - name: Reactivar nodo si fue draineado
-      shell: scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
-      when: 
-        - running_jobs.stdout|int > 0
-        - drain_result is defined
-        - drain_result.rc == 0
-      
-    - name: Mostrar uso final de /tmp
-      shell: df -h /tmp
-      register: final_usage
-      
-    - name: Resultado final
-      debug:
-        msg: 
-          - "Limpieza completada en {{ hostname_full.stdout }}"
-          - "Jobs iniciales: {{ running_jobs.stdout }}"
-          - "Archivos eliminados: {{ old_files.matched }}"
-          - "Directorios eliminados: {{ old_dirs.matched }}"
-          - "Uso final: {{ final_usage.stdout_lines[-1] }}") | list) | length }}"
-      
-    - name: Buscar directorios antiguos para eliminar
-      find:
-        paths: /tmp
-        age: "{{ mtime_days }}d"
-        file_type: directory
-        excludes: "{{ systemd_paths + ['/tmp'] }}"
-      register: old_dirs
-      become: yes
-      
-    - name: Mostrar archivos a eliminar
-      debug:
-        msg: "Archivos a eliminar: {{ old_files.matched }}, Directorios: {{ old_dirs.matched }}"
-        
-    - name: Eliminar archivos antiguos
-      file:
-        path: "{{ item.path }}"
-        state: absent
-      loop: "{{ old_files.files }}"
-      when: old_files.matched > 0
-      become: yes
-      
-    - name: Eliminar directorios antiguos (ordenados por profundidad)
-      file:
-        path: "{{ item.path }}"
-        state: absent
-      loop: "{{ old_dirs.files | sort(attribute='path', reverse=true) }}"
-      when: old_dirs.matched > 0
-      become: yes
-      ignore_errors: yes  # Algunos directorios pueden no estar vacíos
-      
-    - name: Reactivar nodo si fue draineado
-      shell: scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
-      when: 
-        - running_jobs.stdout|int > 0
-        - drain_result is defined
-        - drain_result.rc == 0
-      
-    - name: Mostrar uso final de /tmp
-      shell: df -h /tmp
-      register: final_usage
-      
-    - name: Resultado final
-      debug:
-        msg: 
-          - "Limpieza completada en {{ hostname_full.stdout }}"
-          - "Jobs iniciales: {{ running_jobs.stdout }}"
-          - "Archivos eliminados: {{ old_files.matched }}"
-          - "Directorios eliminados: {{ old_dirs.matched }}"
+          - "Archivos eliminados: {{ old_files_count.stdout }}"
+          - "Directorios eliminados: {{ old_dirs_count.stdout }}"
           - "Uso final: {{ final_usage.stdout_lines[-1] }}"
