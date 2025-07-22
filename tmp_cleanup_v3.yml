@@ -15,6 +15,8 @@
       - "/tmp/.X11-unix*"
       - "/tmp/.XIM-unix*"
       - "/tmp/snap-private-tmp*"
+      - "/tmp/*.time"
+      - "/tmp/slurm*.time"
     
   tasks:
     - name: Verificar si /tmp tiene loop device
