@@ -7,7 +7,7 @@
   tasks:
     - name: Copiar script al nodo (si no está ya)
       ansible.builtin.copy:
-        src: "{{ playbook_dir }}/../scripts/limpieza_tmp.sh"
+        src: "{{ playbook_dir }}/limpieza_tmp.sh" 
         dest: /usr/local/bin/limpieza_tmp.sh
         mode: '0755'
         owner: root
