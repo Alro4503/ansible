@@ -7,15 +7,14 @@
     ansible_become_exe: "sudo -n"
     ansible_become_flags: ""
     mtime_days: 1
-    protected_paths:
+    systemd_paths:
       - "/tmp/systemd-*"
       - "/tmp/.font-unix*"
-      - "/tmp/.ICE-unix*"
+      - "/tmp/.ICE-unix*" 
       - "/tmp/.Test-unix*"
       - "/tmp/.X11-unix*"
       - "/tmp/.XIM-unix*"
       - "/tmp/snap-private-tmp*"
-      - "/tmp/slurm*"  # Añadimos protección para archivos SLURM
     
   tasks:
     - name: Verificar si /tmp tiene loop device
@@ -33,23 +32,16 @@
       register: hostname_full
       changed_when: false
       
-    - name: Verificar jobs corriendo en SLURM (versión robusta)
-      shell: |
-        set -o pipefail
-        squeue -h -w {{ hostname_full.stdout }} 2>/dev/null | wc -l || echo "0"
+    - name: Verificar jobs corriendo en SLURM
+      shell: squeue -h -w {{ hostname_full.stdout }} 2>/dev/null | wc -l
       register: running_jobs
       changed_when: false
       failed_when: false
       
-    - name: Mostrar estado actual de jobs
-      debug:
-        msg: "Jobs corriendo actualmente: {{ running_jobs.stdout }}"
-      
-    - name: Mostrar lista de jobs si existen
+    - name: Mostrar jobs corriendo
       shell: squeue -w {{ hostname_full.stdout }}
       when: running_jobs.stdout|int > 0
       register: job_list
-      changed_when: false
       
     - name: Drainear nodo si hay jobs
       shell: scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Limpieza /tmp automática"
@@ -57,41 +49,35 @@
       register: drain_result
       
     - name: Esperar a que terminen los jobs
-      shell: |
-        set -o pipefail
-        squeue -h -w {{ hostname_full.stdout }} 2>/dev/null | wc -l || echo "0"
+      shell: squeue -h -w {{ hostname_full.stdout }} 2>/dev/null | wc -l
       register: jobs_check
       until: jobs_check.stdout|int == 0
-      retries: 1440
+      retries: 1440  # 12 horas máximo (1440 * 30s)
       delay: 30
       when: running_jobs.stdout|int > 0
       
-    - name: Buscar archivos antiguos para eliminar (excluyendo paths protegidos)
+    - name: Buscar archivos antiguos para eliminar
       find:
         paths: /tmp
         age: "{{ mtime_days }}d"
         file_type: file
-        excludes: "{{ protected_paths }}"
+        excludes: "{{ systemd_paths }}"
       register: old_files
       become: yes
       
-    - name: Buscar directorios antiguos para eliminar (excluyendo paths protegidos)
+    - name: Buscar directorios antiguos para eliminar
       find:
         paths: /tmp
         age: "{{ mtime_days }}d"
         file_type: directory
-        excludes: "{{ protected_paths + ['/tmp'] }}"
+        excludes: "{{ systemd_paths + ['/tmp'] }}"
       register: old_dirs
       become: yes
       
-    - name: Mostrar resumen de limpieza
+    - name: Mostrar archivos a eliminar
       debug:
-        msg: |
-          Resumen de limpieza:
-          - Archivos a eliminar: {{ old_files.matched }}
-          - Directorios a eliminar: {{ old_dirs.matched }}
-          - Paths protegidos: {{ protected_paths }}
-          
+        msg: "Archivos a eliminar: {{ old_files.matched }}, Directorios: {{ old_dirs.matched }}"
+        
     - name: Eliminar archivos antiguos
       file:
         path: "{{ item.path }}"
@@ -107,21 +93,24 @@
       loop: "{{ old_dirs.files | sort(attribute='path', reverse=true) }}"
       when: old_dirs.matched > 0
       become: yes
-      ignore_errors: yes
+      ignore_errors: yes  # Algunos directorios pueden no estar vacíos
       
     - name: Reactivar nodo si fue draineado
       shell: scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
-      when: running_jobs.stdout|int > 0 and drain_result is defined
+      when: 
+        - running_jobs.stdout|int > 0
+        - drain_result is defined
+        - drain_result.rc == 0
       
     - name: Mostrar uso final de /tmp
       shell: df -h /tmp
       register: final_usage
-      changed_when: false
       
     - name: Resultado final
       debug:
-        msg: |
-          Limpieza completada en {{ hostname_full.stdout }}
-          - Archivos eliminados: {{ old_files.matched }}
-          - Directorios eliminados: {{ old_dirs.matched }}
-          - Uso actual: {{ final_usage.stdout_lines[-1] }}
+        msg: 
+          - "Limpieza completada en {{ hostname_full.stdout }}"
+          - "Jobs iniciales: {{ running_jobs.stdout }}"
+          - "Archivos eliminados: {{ old_files.matched }}"
+          - "Directorios eliminados: {{ old_dirs.matched }}"
+          - "Uso final: {{ final_usage.stdout_lines[-1] }}"
