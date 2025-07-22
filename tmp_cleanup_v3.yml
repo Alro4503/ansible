@@ -73,7 +73,7 @@
       
     - name: Buscar directorios antiguos para eliminar
       find:
-        paths: /tmp
+        paths: [/tmp]
         age: "{{ mtime_days }}d"
         file_type: directory
         excludes: "{{ systemd_paths + ['/tmp'] }}"
