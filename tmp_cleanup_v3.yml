@@ -1,5 +1,5 @@
 ---
-- name: Limpieza automática de /tmp usando Ansible nativo v1
+- name: Limpieza automática de /tmp usando Ansible nativo v2
   hosts: all
   become: yes
   
@@ -15,8 +15,6 @@
       - "/tmp/.X11-unix*"
       - "/tmp/.XIM-unix*"
       - "/tmp/snap-private-tmp*"
-      - "/tmp/*.time"
-      - "/tmp/slurm*.time"
     
   tasks:
     - name: Verificar si /tmp tiene loop device
@@ -64,8 +62,115 @@
         age: "{{ mtime_days }}d"
         file_type: file
         excludes: "{{ systemd_paths }}"
-      register: old_files
+        patterns: "*"
+      register: old_files_raw
       become: yes
+      
+    - name: Filtrar archivos .time
+      set_fact:
+        old_files:
+          files: "{{ old_files_raw.files | rejectattr('path', 'match', '.*\\.time
+      
+    - name: Buscar directorios antiguos para eliminar
+      find:
+        paths: /tmp
+        age: "{{ mtime_days }}d"
+        file_type: directory
+        excludes: "{{ systemd_paths + ['/tmp'] }}"
+      register: old_dirs
+      become: yes
+      
+    - name: Mostrar archivos a eliminar
+      debug:
+        msg: "Archivos a eliminar: {{ old_files.matched }}, Directorios: {{ old_dirs.matched }}"
+        
+    - name: Eliminar archivos antiguos
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_files.files }}"
+      when: old_files.matched > 0
+      become: yes
+      
+    - name: Eliminar directorios antiguos (ordenados por profundidad)
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_dirs.files | sort(attribute='path', reverse=true) }}"
+      when: old_dirs.matched > 0
+      become: yes
+      ignore_errors: yes  # Algunos directorios pueden no estar vacíos
+      
+    - name: Reactivar nodo si fue draineado
+      shell: scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
+      when: 
+        - running_jobs.stdout|int > 0
+        - drain_result is defined
+        - drain_result.rc == 0
+      
+    - name: Mostrar uso final de /tmp
+      shell: df -h /tmp
+      register: final_usage
+      
+    - name: Resultado final
+      debug:
+        msg: 
+          - "Limpieza completada en {{ hostname_full.stdout }}"
+          - "Jobs iniciales: {{ running_jobs.stdout }}"
+          - "Archivos eliminados: {{ old_files.matched }}"
+          - "Directorios eliminados: {{ old_dirs.matched }}"
+          - "Uso final: {{ final_usage.stdout_lines[-1] }}") | list }}"
+          matched: "{{ (old_files_raw.files | rejectattr('path', 'match', '.*\\.time
+      
+    - name: Buscar directorios antiguos para eliminar
+      find:
+        paths: /tmp
+        age: "{{ mtime_days }}d"
+        file_type: directory
+        excludes: "{{ systemd_paths + ['/tmp'] }}"
+      register: old_dirs
+      become: yes
+      
+    - name: Mostrar archivos a eliminar
+      debug:
+        msg: "Archivos a eliminar: {{ old_files.matched }}, Directorios: {{ old_dirs.matched }}"
+        
+    - name: Eliminar archivos antiguos
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_files.files }}"
+      when: old_files.matched > 0
+      become: yes
+      
+    - name: Eliminar directorios antiguos (ordenados por profundidad)
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_dirs.files | sort(attribute='path', reverse=true) }}"
+      when: old_dirs.matched > 0
+      become: yes
+      ignore_errors: yes  # Algunos directorios pueden no estar vacíos
+      
+    - name: Reactivar nodo si fue draineado
+      shell: scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
+      when: 
+        - running_jobs.stdout|int > 0
+        - drain_result is defined
+        - drain_result.rc == 0
+      
+    - name: Mostrar uso final de /tmp
+      shell: df -h /tmp
+      register: final_usage
+      
+    - name: Resultado final
+      debug:
+        msg: 
+          - "Limpieza completada en {{ hostname_full.stdout }}"
+          - "Jobs iniciales: {{ running_jobs.stdout }}"
+          - "Archivos eliminados: {{ old_files.matched }}"
+          - "Directorios eliminados: {{ old_dirs.matched }}"
+          - "Uso final: {{ final_usage.stdout_lines[-1] }}") | list) | length }}"
       
     - name: Buscar directorios antiguos para eliminar
       find:
