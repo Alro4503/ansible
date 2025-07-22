@@ -1,5 +1,5 @@
 ---
-- name: Limpieza automática de /tmp usando Ansible nativo v3
+- name: Limpieza automática de /tmp usando Ansible nativo
   hosts: all
   become: yes
   
@@ -58,7 +58,8 @@
       
     - name: Buscar archivos antiguos para eliminar
       find:
-        paths: [/tmp]
+        paths:
+          - /tmp
         age: "{{ mtime_days }}d"
         file_type: file
         excludes: "{{ systemd_paths }}"
@@ -73,7 +74,8 @@
       
     - name: Buscar directorios antiguos para eliminar
       find:
-        paths: [/tmp]
+        paths:
+          - /tmp
         age: "{{ mtime_days }}d"
         file_type: directory
         excludes: "{{ systemd_paths + ['/tmp'] }}"
