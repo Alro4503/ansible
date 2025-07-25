@@ -1,57 +1,52 @@
 ---
-- name: Asegurar que la línea específica esté comentada en slurm.conf
+- name: Actualizar nodos en partición de slurm.conf
   hosts: all
   become: yes
   vars:
-    linea_deseada: "PartitionName=interactive Nodes=bioinf3.vhio.org,bioinf4.vhio.org,bioinf6.vhio.org MaxTime=INFINITE State=UP PriorityTier=50"
-    
+    partition_name: "interactive"  # Nombre de la partición a modificar
+    nuevos_nodos: ["bioinf3.vhio.org", "bioinf4.vhio.org", "bioinf5.vhio.org", "bioinf6.vhio.org", "bioinf7.vhio.org"]  # Lista COMPLETA de nodos deseada
+
   tasks:
-    - name: Verificar existencia de slurm.conf
+    - name: Verificar existencia del archivo
       stat:
         path: /etc/slurm/slurm.conf
       register: slurm_conf
-    
-    - name: Buscar cualquier versión de la línea (comentada o no)
-      shell: |
-        grep -F "{{ linea_deseada }}" /etc/slurm/slurm.conf || echo "no_existe"
-      register: linea_actual
-      changed_when: false
-      when: slurm_conf.stat.exists
-    
-    - name: Mostrar estado actual de la línea
-      debug:
-        var: linea_actual.stdout_lines
-      when: slurm_conf.stat.exists
-    
-    - name: Añadir línea comentada (si no existe en ninguna forma)
-      lineinfile:
-        path: /etc/slurm/slurm.conf
-        line: "# {{ linea_deseada }}"
-        state: present
-      when: 
-        - slurm_conf.stat.exists
-        - "'no_existe' in linea_actual.stdout"
-    
-    - name: Comentar línea si existe sin comentar
+
+    - name: Actualizar lista de nodos (versión activa)
       replace:
         path: /etc/slurm/slurm.conf
-        regexp: "^{{ linea_deseada }}$"
-        replace: "# {{ linea_deseada }}"
-      when: 
-        - slurm_conf.stat.exists
-        - "'{{ linea_deseada }}' in linea_actual.stdout"
-    
-    - name: Mostrar resumen final
+        regexp: '^(PartitionName={{ partition_name }}.*Nodes=)[^ ]+'
+        replace: '\1{{ nuevos_nodos | join(",") }}'
+        backrefs: yes
+      register: cambio_activo
+      when: slurm_conf.stat.exists
+
+    - name: Actualizar lista de nodos (versión comentada)
+      replace:
+        path: /etc/slurm/slurm.conf
+        regexp: '^(#\s*PartitionName={{ partition_name }}.*Nodes=)[^ ]+'
+        replace: '\1{{ nuevos_nodos | join(",") }}'
+        backrefs: yes
+      register: cambio_comentado
+      when: slurm_conf.stat.exists
+
+    - name: Verificar cambios
+      shell: |
+        grep -A2 "PartitionName={{ partition_name }}" /etc/slurm/slurm.conf || echo "No encontrado"
+      register: verificacion
+      changed_when: false
+      when: slurm_conf.stat.exists
+
+    - name: Mostrar resultado
       debug:
-        msg: |
-          ===== RESUMEN FINAL =====
-          Archivo slurm.conf existe: {{ slurm_conf.stat.exists }}
-          Estado línea:
-            - Ya existía comentada: {{ '# ' + linea_deseada in linea_actual.stdout_lines }}
-            - Existía sin comentar: {{ linea_deseada in linea_actual.stdout_lines }}
-            - No existía: {{ 'no_existe' in linea_actual.stdout }}
-          
-          Acciones realizadas:
-            - Línea añadida como comentario: {{ '# ' + linea_deseada in linea_actual.stdout_lines and 'no_existe' in linea_actual.stdout }}
-            - Línea comentada: {{ linea_deseada in linea_actual.stdout_lines }}
-            - Sin cambios necesarios: {{ '# ' + linea_deseada in linea_actual.stdout_lines }}
+        msg: |-
+          === RESULTADO EN {{ inventory_hostname }} ===
+          {% if cambio_activo is defined and cambio_activo.changed %}
+          - Se actualizó la versión ACTIVA de la partición
+          {% elif cambio_comentado is defined and cambio_comentado.changed %}
+          - Se actualizó solo la versión COMENTADA
+          {% else %}
+          - No se realizaron cambios (¿La partición existe?)
+          {% endif %}
+          Configuración actual:
+          {{ verificacion.stdout if verificacion is defined else "Archivo no encontrado" }}
