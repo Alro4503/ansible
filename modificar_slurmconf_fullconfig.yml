@@ -8,8 +8,8 @@
       Nodes: "bioinf3.vhio.org,bioinf4.vhio.org,bioinf5.vhio.org,bioinf8.vhio.org"
       MaxTime: "INFINITE"
       State: "UP"
-      PriorityTier: "50"
-      Default: "NO"
+      PriorityTier: "100"
+      # Default: "NO"
       AllowGroups: ""
       AllowAccounts: ""
 
