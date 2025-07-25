@@ -1,69 +1,28 @@
 ---
-- name: Gestión definitiva de la partición interactive en slurm.conf
+- name: Arreglar definitivamente la partición interactive en slurm.conf
   hosts: all
   become: yes
   vars:
-    partition_name: "interactive"
-    nuevos_nodos: ["bioinf3.vhio.org", "bioinf4.vhio.org", "bioinf5.vhio.org", "bioinf6.vhio.org"]
-    partition_params: "MaxTime=INFINITE State=UP PriorityTier=50"
-    
+    linea_correcta: "PartitionName=interactive Nodes=bioinf3.vhio.org,bioinf4.vhio.org,bioinf5.vhio.org,bioinf6.vhio.org MaxTime=INFINITE State=UP PriorityTier=50"
+
   tasks:
-    - name: Verificar existencia de slurm.conf
-      stat:
+    - name: Eliminar todas las versiones existentes (activas o comentadas)
+      lineinfile:
         path: /etc/slurm/slurm.conf
-      register: slurm_conf
-    
-    - name: Buscar TODAS las líneas de la partición interactive
-      shell: |
-        grep -P "(^#\s*)?PartitionName={{ partition_name }}\s+" /etc/slurm/slurm.conf || echo "no_existe"
-      register: lineas_actuales
-      changed_when: false
-      when: slurm_conf.stat.exists
-    
-    - name: Crear línea perfectamente formateada
-      set_fact:
-        linea_correcta: "PartitionName={{ partition_name }} Nodes={{ nuevos_nodos | join(',') }} {{ partition_params }}"
-    
-    - name: Procesar líneas existentes
-      block:
-        - name: Eliminar todas las versiones existentes (comentadas o no)
-          lineinfile:
-            path: /etc/slurm/slurm.conf
-            state: absent
-            regexp: "(^#\s*)?PartitionName={{ partition_name }}\s+"
-          register: lineas_eliminadas
-        
-        - name: Añadir línea correctamente formateada
-          lineinfile:
-            path: /etc/slurm/slurm.conf
-            line: "{{ linea_correcta }}"
-            insertafter: EOF
-          register: linea_anadida
-      when: 
-        - slurm_conf.stat.exists
-        - "'no_existe' not in lineas_actuales.stdout"
-    
-    - name: Añadir línea si no existía previamente
+        state: absent
+        regexp: "^#?.*PartitionName=interactive.*"
+
+    - name: Añadir línea correcta al final del archivo
       lineinfile:
         path: /etc/slurm/slurm.conf
         line: "{{ linea_correcta }}"
         insertafter: EOF
-      when: 
-        - slurm_conf.stat.exists
-        - "'no_existe' in lineas_actuales.stdout"
-    
-    - name: Mostrar resumen EJECUTIVO
+
+    - name: Verificar resultado
+      shell: grep -A2 "PartitionName=interactive" /etc/slurm/slurm.conf
+      register: resultado
+      changed_when: false
+
+    - name: Mostrar resultado
       debug:
-        msg: |-
-          === RESULTADO FINAL EN {{ inventory_hostname }} ===
-          {% if 'no_existe' in lineas_actuales.stdout %}
-          ACCIÓN: Línea añadida por primera vez
-          {% else %}
-          ACCIÓN: Líneas existentes reemplazadas ({{ lineas_actuales.stdout_lines | length }} versiones)
-          {% endif %}
-          CONFIGURACIÓN APLICADA:
-          {{ linea_correcta }}
-          
-          VERIFICACIÓN MANUAL RECOMENDADA:
-          ssh {{ inventory_hostname }} "grep -A2 'PartitionName={{ partition_name }}' /etc/slurm/slurm.conf"
-      when: slurm_conf.stat.exists
+        msg: "Configuración actual: {{ resultado.stdout }}"
