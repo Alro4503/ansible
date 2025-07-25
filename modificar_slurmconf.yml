@@ -1,52 +1,55 @@
 ---
-- name: Actualizar nodos en partición de slurm.conf
+- name: Actualización directa de nodos en slurm.conf (versión corregida)
   hosts: all
   become: yes
   vars:
-    partition_name: "interactive"  # Nombre de la partición a modificar
-    nuevos_nodos: ["bioinf3.vhio.org", "bioinf4.vhio.org", "bioinf5.vhio.org", "bioinf6.vhio.org", "bioinf7.vhio.org"]  # Lista COMPLETA de nodos deseada
+    partition_name: "interactive"
+    nuevos_nodos: ["bioinf3.vhio.org", "bioinf4.vhio.org", "bioinf5.vhio.org", "bioinf6.vhio.org"]
+    params_fijos: "MaxTime=INFINITE State=UP PriorityTier=50"
 
   tasks:
-    - name: Verificar existencia del archivo
+    - name: Verificar archivo de configuración
       stat:
         path: /etc/slurm/slurm.conf
       register: slurm_conf
 
-    - name: Actualizar lista de nodos (versión activa)
-      replace:
-        path: /etc/slurm/slurm.conf
-        regexp: '^(PartitionName={{ partition_name }}.*Nodes=)[^ ]+'
-        replace: '\1{{ nuevos_nodos | join(",") }}'
-        backrefs: yes
-      register: cambio_activo
-      when: slurm_conf.stat.exists
-
-    - name: Actualizar lista de nodos (versión comentada)
-      replace:
-        path: /etc/slurm/slurm.conf
-        regexp: '^(#\s*PartitionName={{ partition_name }}.*Nodes=)[^ ]+'
-        replace: '\1{{ nuevos_nodos | join(",") }}'
-        backrefs: yes
-      register: cambio_comentado
-      when: slurm_conf.stat.exists
-
-    - name: Verificar cambios
+    - name: Obtener línea actual (para mantener otros parámetros)
       shell: |
-        grep -A2 "PartitionName={{ partition_name }}" /etc/slurm/slurm.conf || echo "No encontrado"
-      register: verificacion
+        grep -P "^(#?\s*PartitionName={{ partition_name }}\s+Nodes=)[^ ]+" /etc/slurm/slurm.conf || echo "no_encontrado"
+      register: linea_actual
       changed_when: false
       when: slurm_conf.stat.exists
 
-    - name: Mostrar resultado
+    - name: Construir nueva línea manteniendo formato
+      set_fact:
+        nueva_linea: "{{ (linea_actual.stdout is match('^#')) | ternary('# ','') }}PartitionName={{ partition_name }} Nodes={{ nuevos_nodos | join(',') }} {{ params_fijos }}"
+      when: 
+        - slurm_conf.stat.exists
+        - "'no_encontrado' not in linea_actual.stdout"
+
+    - name: Reemplazar línea existente
+      replace:
+        path: /etc/slurm/slurm.conf
+        regexp: "^{{ linea_actual.stdout | regex_escape() }}$"
+        replace: "{{ nueva_linea }}"
+      when: 
+        - slurm_conf.stat.exists
+        - nueva_linea is defined
+      register: cambio_realizado
+
+    - name: Mostrar resumen ejecutivo
       debug:
         msg: |-
           === RESULTADO EN {{ inventory_hostname }} ===
-          {% if cambio_activo is defined and cambio_activo.changed %}
-          - Se actualizó la versión ACTIVA de la partición
-          {% elif cambio_comentado is defined and cambio_comentado.changed %}
-          - Se actualizó solo la versión COMENTADA
+          {% if 'no_encontrado' in linea_actual.stdout %}
+          AVISO: Partición '{{ partition_name }}' no encontrada
+          {% elif cambio_realizado.changed %}
+          ÉXITO: Línea actualizada:
+          {{ nueva_linea }}
           {% else %}
-          - No se realizaron cambios (¿La partición existe?)
+          INFO: La configuración ya estaba actualizada
           {% endif %}
-          Configuración actual:
-          {{ verificacion.stdout if verificacion is defined else "Archivo no encontrado" }}
+          
+          Verificación manual:
+          grep -A2 "PartitionName={{ partition_name }}" /etc/slurm/slurm.conf
+      when: slurm_conf.stat.exists
