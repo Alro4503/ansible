@@ -1,9 +1,10 @@
 ---
-- name: Actualizar correctamente nodos en la partición interactive
+- name: Gestión segura de nodos en la partición interactive de slurm.conf
   hosts: all
   become: yes
   vars:
-    linea_base: "PartitionName=interactive Nodes=bioinf3.vhio.org,bioinf4.vhio.org,bioinf6.vhio.org"
+    config_base: "PartitionName=interactive Nodes=bioinf3.vhio.org,bioinf4.vhio.org,bioinf6.vhio.org"
+    config_suffix: "MaxTime=INFINITE State=UP PriorityTier=50"
     nuevo_nodo: "bioinf5.vhio.org"
     
   tasks:
@@ -12,49 +13,59 @@
         path: /etc/slurm/slurm.conf
       register: slurm_conf
     
-    - name: Buscar línea de la partición interactive (comentada o no)
+    - name: Buscar línea de la partición interactive
       shell: |
-        grep -P "(^#\s*)?{{ linea_base | regex_escape() }}" /etc/slurm/slurm.conf || echo "no_existe"
+        grep -P "(^#\s*)?{{ config_base | regex_escape() }}" /etc/slurm/slurm.conf || echo "no_existe"
       register: linea_actual
       changed_when: false
       when: slurm_conf.stat.exists
     
-    - name: Crear nueva línea correctamente formateada
-      set_fact:
-        nueva_linea: "{{ (linea_actual.stdout is match('^#')) | ternary('# ','') }}{{ linea_base }},{{ nuevo_nodo }} MaxTime=INFINITE State=UP PriorityTier=50"
+    - name: Determinar nueva configuración
+      block:
+        - name: Extraer nodos actuales
+          set_fact:
+            nodos_actuales: "{{ (linea_actual.stdout | regex_search('Nodes=([^ ]+)') | first).split('=')[1] }}"
+        
+        - name: Construir nueva línea
+          set_fact:
+            nueva_linea: >-
+              {% if linea_actual.stdout.startswith('#') %}# {% endif %}{{ config_base }}{% if nuevo_nodo not in nodos_actuales %},{{ nuevo_nodo }}{% endif %} {{ config_suffix }}
       when: 
         - slurm_conf.stat.exists
         - "'no_existe' not in linea_actual.stdout"
     
-    - name: Reemplazar línea existente
-      replace:
-        path: /etc/slurm/slurm.conf
-        regexp: "{{ linea_actual.stdout | regex_escape() }}"
-        replace: "{{ nueva_linea }}"
+    - name: Actualizar configuración si es necesario
+      block:
+        - name: Verificar si se necesita cambio
+          set_fact:
+            necesita_cambio: "{{ nuevo_nodo not in nodos_actuales }}"
+        
+        - name: Reemplazar línea existente
+          replace:
+            path: /etc/slurm/slurm.conf
+            regexp: "{{ linea_actual.stdout | regex_escape() }}"
+            replace: "{{ nueva_linea }}"
+          when: necesita_cambio
+          register: cambio_realizado
+        
+        - name: Eliminar líneas comentadas duplicadas
+          lineinfile:
+            path: /etc/slurm/slurm.conf
+            state: absent
+            regexp: "^#.*{{ config_base | regex_escape() }}.*{{ config_suffix | regex_escape() }}"
+          when: 
+            - cambio_realizado is defined
+            - cambio_realizado.changed
       when: 
         - slurm_conf.stat.exists
         - "'no_existe' not in linea_actual.stdout"
         - nueva_linea is defined
-      register: cambio_realizado
     
-    - name: Mostrar resumen claro de cambios
+    - name: Mostrar resumen de ejecución
       debug:
         msg: |-
-          ===== CAMBIOS REALIZADOS =====
-          Línea original encontrada: {{ linea_actual.stdout }}
-          Nueva línea configurada: {{ nueva_linea }}
-          Nodo añadido: {{ nuevo_nodo }}
-          
-          NOTA: Servicios no reiniciados.
-          Verificar cambios antes de reiniciar.
+          === RESULTADO EN {{ inventory_hostname }} ===
+          Estado: {% if 'no_existe' in linea_actual.stdout %}Línea no encontrada{% else %}
+          Configuración actual: {{ linea_actual.stdout }}
+          Nueva configuración: {{ nueva_linea }}{% if not necesita_cambio %} (Sin cambios necesarios){% endif %}{% endif %}
       when: slurm_conf.stat.exists
-    
-    - name: Eliminar líneas duplicadas comentadas incorrectas
-      lineinfile:
-        path: /etc/slurm/slurm.conf
-        state: absent
-        regexp: "^#.*{{ linea_base | regex_escape() }}"
-      when: 
-        - slurm_conf.stat.exists
-        - cambio_realizado is defined
-        - cambio_realizado.changed
