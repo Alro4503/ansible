@@ -1,9 +1,9 @@
 ---
-- name: Actualizar nodos en la partición interactive de slurm.conf
+- name: Actualizar correctamente nodos en la partición interactive
   hosts: all
   become: yes
   vars:
-    linea_original: "PartitionName=interactive Nodes=bioinf3.vhio.org,bioinf4.vhio.org,bioinf6.vhio.org MaxTime=INFINITE State=UP PriorityTier=50"
+    linea_base: "PartitionName=interactive Nodes=bioinf3.vhio.org,bioinf4.vhio.org,bioinf6.vhio.org"
     nuevo_nodo: "bioinf5.vhio.org"
     
   tasks:
@@ -12,16 +12,16 @@
         path: /etc/slurm/slurm.conf
       register: slurm_conf
     
-    - name: Buscar línea de la partición interactive
+    - name: Buscar línea de la partición interactive (comentada o no)
       shell: |
-        grep -P "PartitionName=interactive Nodes=.*MaxTime=INFINITE State=UP PriorityTier=50" /etc/slurm/slurm.conf || echo "no_existe"
+        grep -P "(^#\s*)?{{ linea_base | regex_escape() }}" /etc/slurm/slurm.conf || echo "no_existe"
       register: linea_actual
       changed_when: false
       when: slurm_conf.stat.exists
     
-    - name: Crear nueva línea con nodo añadido
+    - name: Crear nueva línea correctamente formateada
       set_fact:
-        nueva_linea: "{{ (linea_actual.stdout is regex('^#.*')) | ternary('# ','') }}PartitionName=interactive Nodes={{ linea_actual.stdout | regex_search('Nodes=([^ ]+)') | first | split('=') | last }},{{ nuevo_nodo }} MaxTime=INFINITE State=UP PriorityTier=50"
+        nueva_linea: "{{ (linea_actual.stdout is match('^#')) | ternary('# ','') }}{{ linea_base }},{{ nuevo_nodo }} MaxTime=INFINITE State=UP PriorityTier=50"
       when: 
         - slurm_conf.stat.exists
         - "'no_existe' not in linea_actual.stdout"
@@ -35,14 +35,26 @@
         - slurm_conf.stat.exists
         - "'no_existe' not in linea_actual.stdout"
         - nueva_linea is defined
+      register: cambio_realizado
     
-    - name: Mostrar resumen de cambios
+    - name: Mostrar resumen claro de cambios
       debug:
-        msg: |
+        msg: |-
           ===== CAMBIOS REALIZADOS =====
-          Línea original: {{ linea_actual.stdout }}
-          Nueva línea: {{ nueva_linea }}
+          Línea original encontrada: {{ linea_actual.stdout }}
+          Nueva línea configurada: {{ nueva_linea }}
           Nodo añadido: {{ nuevo_nodo }}
           
-          NOTA: Los servicios no se han reiniciado.
-          Ejecutar playbook de reinicio cuando se confirme el cambio.
+          NOTA: Servicios no reiniciados.
+          Verificar cambios antes de reiniciar.
+      when: slurm_conf.stat.exists
+    
+    - name: Eliminar líneas duplicadas comentadas incorrectas
+      lineinfile:
+        path: /etc/slurm/slurm.conf
+        state: absent
+        regexp: "^#.*{{ linea_base | regex_escape() }}"
+      when: 
+        - slurm_conf.stat.exists
+        - cambio_realizado is defined
+        - cambio_realizado.changed
