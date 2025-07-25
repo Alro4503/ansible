@@ -1,0 +1,48 @@
+---
+- name: Actualizar nodos en la partición interactive de slurm.conf
+  hosts: all
+  become: yes
+  vars:
+    linea_original: "PartitionName=interactive Nodes=bioinf3.vhio.org,bioinf4.vhio.org,bioinf6.vhio.org MaxTime=INFINITE State=UP PriorityTier=50"
+    nuevo_nodo: "bioinf5.vhio.org"
+    
+  tasks:
+    - name: Verificar existencia de slurm.conf
+      stat:
+        path: /etc/slurm/slurm.conf
+      register: slurm_conf
+    
+    - name: Buscar línea de la partición interactive
+      shell: |
+        grep -P "PartitionName=interactive Nodes=.*MaxTime=INFINITE State=UP PriorityTier=50" /etc/slurm/slurm.conf || echo "no_existe"
+      register: linea_actual
+      changed_when: false
+      when: slurm_conf.stat.exists
+    
+    - name: Crear nueva línea con nodo añadido
+      set_fact:
+        nueva_linea: "{{ (linea_actual.stdout is regex('^#.*')) | ternary('# ','') }}PartitionName=interactive Nodes={{ linea_actual.stdout | regex_search('Nodes=([^ ]+)') | first | split('=') | last }},{{ nuevo_nodo }} MaxTime=INFINITE State=UP PriorityTier=50"
+      when: 
+        - slurm_conf.stat.exists
+        - "'no_existe' not in linea_actual.stdout"
+    
+    - name: Reemplazar línea existente
+      replace:
+        path: /etc/slurm/slurm.conf
+        regexp: "{{ linea_actual.stdout | regex_escape() }}"
+        replace: "{{ nueva_linea }}"
+      when: 
+        - slurm_conf.stat.exists
+        - "'no_existe' not in linea_actual.stdout"
+        - nueva_linea is defined
+    
+    - name: Mostrar resumen de cambios
+      debug:
+        msg: |
+          ===== CAMBIOS REALIZADOS =====
+          Línea original: {{ linea_actual.stdout }}
+          Nueva línea: {{ nueva_linea }}
+          Nodo añadido: {{ nuevo_nodo }}
+          
+          NOTA: Los servicios no se han reiniciado.
+          Ejecutar playbook de reinicio cuando se confirme el cambio.
