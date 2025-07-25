@@ -4,7 +4,7 @@
   become: yes
   vars:
     partition_name: "interactive"
-    nuevos_nodos: ["bioinf3.vhio.org", "bioinf4.vhio.org", "bioinf5.vhio.org", "bioinf6.vhio.org"]
+    nuevos_nodos: ["bioinf3.vhio.org", "bioinf4.vhio.org", "bioinf5.vhio.org", "bioinf8.vhio.org"]
     params_fijos: "MaxTime=INFINITE State=UP PriorityTier=50"
 
   tasks:
