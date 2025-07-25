@@ -3,7 +3,7 @@
   hosts: all
   become: yes
   vars:
-    linea_correcta: "PartitionName=interactive Nodes=bioinf3.vhio.org,bioinf4.vhio.org,bioinf5.vhio.org,bioinf6.vhio.org MaxTime=INFINITE State=UP PriorityTier=50"
+    linea_correcta: "# PartitionName=interactive Nodes=bioinf3.vhio.org,bioinf4.vhio.org,bioinf5.vhio.org,bioinf6.vhio.org MaxTime=INFINITE State=UP PriorityTier=50"
 
   tasks:
     - name: Eliminar todas las versiones existentes (activas o comentadas)
