@@ -1,0 +1,48 @@
+---
+- name: Comentar línea de partición interactive en slurm.conf (validación inicial)
+  hosts: all
+  become: yes
+  vars:
+    linea_a_comentar: "PartitionName=interactive Nodes=bioinf3.vhio.org,bioinf4.vhio.org,bioinf6.vhio.org MaxTime=INFINITE State=UP PriorityTier=50"
+    
+  tasks:
+    - name: Verificar existencia de slurm.conf
+      stat:
+        path: /etc/slurm/slurm.conf
+      register: slurm_conf
+    
+    - name: Comprobar si la línea ya existe comentada
+      shell: |
+        grep -Fx "# {{ linea_a_comentar }}" /etc/slurm/slurm.conf || echo "no_existe"
+      register: linea_comentada
+      changed_when: false
+      when: slurm_conf.stat.exists
+    
+    - name: Comprobar si la línea existe sin comentar
+      shell: |
+        grep -Fx "{{ linea_a_comentar }}" /etc/slurm/slurm.conf || echo "no_existe"
+      register: linea_sin_comentar
+      changed_when: false
+      when: slurm_conf.stat.exists
+    
+    - name: Comentar línea si existe sin comentar
+      replace:
+        path: /etc/slurm/slurm.conf
+        regexp: "^{{ linea_a_comentar }}$"
+        replace: "# {{ linea_a_comentar }}"
+      when: 
+        - slurm_conf.stat.exists
+        - "'no_existe' not in linea_comentada.stdout"
+        - "'no_existe' not in linea_sin_comentar.stdout"
+    
+    - name: Mostrar resumen de estado
+      debug:
+        msg: |
+          ===== RESUMEN =====
+          Archivo slurm.conf existe: {{ slurm_conf.stat.exists }}
+          Línea ya comentada: {{ 'no_existe' not in linea_comentada.stdout }}
+          Línea sin comentar: {{ 'no_existe' not in linea_sin_comentar.stdout }}
+          Cambios realizados: {{ 'no_existe' not in linea_sin_comentar.stdout and 'no_existe' not in linea_comentada.stdout }}
+          
+          NOTA: Los servicios no se han reiniciado.
+          Para aplicar cambios ejecutar el playbook de reinicio cuando se confirme.
