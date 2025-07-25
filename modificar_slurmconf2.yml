@@ -1,11 +1,11 @@
 ---
-- name: Gestión segura de nodos en la partición interactive de slurm.conf
+- name: Gestión definitiva de la partición interactive en slurm.conf
   hosts: all
   become: yes
   vars:
-    config_base: "PartitionName=interactive Nodes=bioinf3.vhio.org,bioinf4.vhio.org,bioinf6.vhio.org"
-    config_suffix: "MaxTime=INFINITE State=UP PriorityTier=50"
-    nuevo_nodo: "bioinf5.vhio.org"
+    partition_name: "interactive"
+    nuevos_nodos: ["bioinf3.vhio.org", "bioinf4.vhio.org", "bioinf5.vhio.org", "bioinf6.vhio.org"]
+    partition_params: "MaxTime=INFINITE State=UP PriorityTier=50"
     
   tasks:
     - name: Verificar existencia de slurm.conf
@@ -13,59 +13,57 @@
         path: /etc/slurm/slurm.conf
       register: slurm_conf
     
-    - name: Buscar línea de la partición interactive
+    - name: Buscar TODAS las líneas de la partición interactive
       shell: |
-        grep -P "(^#\s*)?{{ config_base | regex_escape() }}" /etc/slurm/slurm.conf || echo "no_existe"
-      register: linea_actual
+        grep -P "(^#\s*)?PartitionName={{ partition_name }}\s+" /etc/slurm/slurm.conf || echo "no_existe"
+      register: lineas_actuales
       changed_when: false
       when: slurm_conf.stat.exists
     
-    - name: Determinar nueva configuración
-      block:
-        - name: Extraer nodos actuales
-          set_fact:
-            nodos_actuales: "{{ (linea_actual.stdout | regex_search('Nodes=([^ ]+)') | first).split('=')[1] }}"
-        
-        - name: Construir nueva línea
-          set_fact:
-            nueva_linea: >-
-              {% if linea_actual.stdout.startswith('#') %}# {% endif %}{{ config_base }}{% if nuevo_nodo not in nodos_actuales %},{{ nuevo_nodo }}{% endif %} {{ config_suffix }}
-      when: 
-        - slurm_conf.stat.exists
-        - "'no_existe' not in linea_actual.stdout"
+    - name: Crear línea perfectamente formateada
+      set_fact:
+        linea_correcta: "PartitionName={{ partition_name }} Nodes={{ nuevos_nodos | join(',') }} {{ partition_params }}"
     
-    - name: Actualizar configuración si es necesario
+    - name: Procesar líneas existentes
       block:
-        - name: Verificar si se necesita cambio
-          set_fact:
-            necesita_cambio: "{{ nuevo_nodo not in nodos_actuales }}"
-        
-        - name: Reemplazar línea existente
-          replace:
-            path: /etc/slurm/slurm.conf
-            regexp: "{{ linea_actual.stdout | regex_escape() }}"
-            replace: "{{ nueva_linea }}"
-          when: necesita_cambio
-          register: cambio_realizado
-        
-        - name: Eliminar líneas comentadas duplicadas
+        - name: Eliminar todas las versiones existentes (comentadas o no)
           lineinfile:
             path: /etc/slurm/slurm.conf
             state: absent
-            regexp: "^#.*{{ config_base | regex_escape() }}.*{{ config_suffix | regex_escape() }}"
-          when: 
-            - cambio_realizado is defined
-            - cambio_realizado.changed
+            regexp: "(^#\s*)?PartitionName={{ partition_name }}\s+"
+          register: lineas_eliminadas
+        
+        - name: Añadir línea correctamente formateada
+          lineinfile:
+            path: /etc/slurm/slurm.conf
+            line: "{{ linea_correcta }}"
+            insertafter: EOF
+          register: linea_anadida
       when: 
         - slurm_conf.stat.exists
-        - "'no_existe' not in linea_actual.stdout"
-        - nueva_linea is defined
+        - "'no_existe' not in lineas_actuales.stdout"
     
-    - name: Mostrar resumen de ejecución
+    - name: Añadir línea si no existía previamente
+      lineinfile:
+        path: /etc/slurm/slurm.conf
+        line: "{{ linea_correcta }}"
+        insertafter: EOF
+      when: 
+        - slurm_conf.stat.exists
+        - "'no_existe' in lineas_actuales.stdout"
+    
+    - name: Mostrar resumen EJECUTIVO
       debug:
         msg: |-
-          === RESULTADO EN {{ inventory_hostname }} ===
-          Estado: {% if 'no_existe' in linea_actual.stdout %}Línea no encontrada{% else %}
-          Configuración actual: {{ linea_actual.stdout }}
-          Nueva configuración: {{ nueva_linea }}{% if not necesita_cambio %} (Sin cambios necesarios){% endif %}{% endif %}
+          === RESULTADO FINAL EN {{ inventory_hostname }} ===
+          {% if 'no_existe' in lineas_actuales.stdout %}
+          ACCIÓN: Línea añadida por primera vez
+          {% else %}
+          ACCIÓN: Líneas existentes reemplazadas ({{ lineas_actuales.stdout_lines | length }} versiones)
+          {% endif %}
+          CONFIGURACIÓN APLICADA:
+          {{ linea_correcta }}
+          
+          VERIFICACIÓN MANUAL RECOMENDADA:
+          ssh {{ inventory_hostname }} "grep -A2 'PartitionName={{ partition_name }}' /etc/slurm/slurm.conf"
       when: slurm_conf.stat.exists
