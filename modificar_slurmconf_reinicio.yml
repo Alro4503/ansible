@@ -5,7 +5,7 @@
   vars:
     partition_name: "interactive"
     config_completa:
-      Nodes: "bioinf3.vhio.org,bioinf4.vhio.org,bioinf5.vhio.org,bioinf8.vhio.org"
+      Nodes: "bioinf3.vhio.org,bioinf4.vhio.org,bioinf5.vhio.org,bioinf9.vhio.org"
       MaxTime: "INFINITE"
       State: "UP"
       PriorityTier: "100"
