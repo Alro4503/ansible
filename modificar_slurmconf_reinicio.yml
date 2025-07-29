@@ -1,5 +1,5 @@
 ---
-- name: "Modificación de slurm.conf con reinicio controlado"
+- name: "Modificación segura de slurm.conf con reinicio controlado"
   hosts: all
   become: yes
   vars:
@@ -14,19 +14,19 @@
 
   tasks:
     # === FASE 1 - MODIFICACIÓN DE CONFIGURACIÓN ===
-    - name: Verificar existencia de slurm.conf
+    - name: Verificar slurm.conf
       stat:
         path: /etc/slurm/slurm.conf
       register: slurm_conf
 
-    - name: Obtener configuración actual de la partición
+    - name: Obtener configuración actual
       shell: |
         grep -P "^(#?\s*PartitionName={{ partition_name }}\b)" /etc/slurm/slurm.conf || echo "no_encontrado"
       register: linea_actual
       changed_when: false
       when: slurm_conf.stat.exists
 
-    - name: Construir nueva línea de configuración
+    - name: Construir nueva configuración
       set_fact:
         nueva_linea: >-
           {% set is_commented = linea_actual.stdout is match('^#') %}{% if is_commented %}# {% endif %}PartitionName={{ partition_name }}
@@ -35,7 +35,7 @@
         - slurm_conf.stat.exists
         - "'no_encontrado' not in linea_actual.stdout"
 
-    - name: Aplicar cambios en slurm.conf
+    - name: Aplicar cambios
       replace:
         path: /etc/slurm/slurm.conf
         regexp: "^{{ linea_actual.stdout | regex_escape() }}$"
@@ -44,28 +44,28 @@
         - slurm_conf.stat.exists
         - nueva_linea is defined
       register: cambio_realizado
-      notify: Reiniciar SLURM
+      notify: Reiniciar servicios SLURM
 
     # === FASE 2 - VERIFICACIÓN ===
-    - name: Mostrar resumen detallado
+    - name: Mostrar resumen
       debug:
         msg: |-
-          === RESULTADO EN {{ inventory_hostname }} ===
-          {% if 'no_encontrado' in linea_actual.stdout %}
-          ❌ ERROR: Partición no encontrada
-          {% elif cambio_realizado.changed %}
-          ✅ CONFIG MODIFICADA:
-          {{ nueva_linea | trim }}
-          {% else %}
-          ℹ️ Configuración ya actualizada
-          {% endif %}
+          [{{ inventory_hostname }}] 
+          Estado: {% if cambio_realizado.changed %}MODIFICADO{% else %}OK (sin cambios){% endif %}
+          Config: {{ nueva_linea | trim | default('No modificado') }}
 
   handlers:
-    - name: Reiniciar SLURM
-      command: systemctl restart slurmctld
-      when: >
-        not (
-          'mdrvpremst01' in inventory_hostname or
-          'mdrvpremst01.' in inventory_hostname
-        )
-      listen: Reiniciar SLURM
+    - name: Reiniciar servicios SLURM
+      block:
+        - name: Reiniciar slurmctld (solo en master)
+          command: systemctl restart slurmctld
+          when: "'mdrvpremst01' in inventory_hostname or 'mdrvpremst01.' in inventory_hostname"
+
+        - name: Reiniciar slurmd (solo en workers)
+          command: systemctl restart slurmd
+          when: >
+            not (
+              'mdrvpremst01' in inventory_hostname or
+              'mdrvpremst01.' in inventory_hostname
+            )
+      listen: Reiniciar servicios SLURM
