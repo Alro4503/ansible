@@ -1,11 +1,11 @@
 ---
 - name: "Modificación de slurm.conf con reinicio controlado"
-  hosts: all  # Se ejecuta en todos los nodos
+  hosts: all
   become: yes
   vars:
     partition_name: "interactive"
     config_completa:
-      Nodes: "bioinf3.vhio.org,bioinf4.vhio.org,bioinf5.vhio.org,bioinf9.vhio.org"
+      Nodes: "bioinf3.vhio.org,bioinf4.vhio.org,bioinf5.vhio.org,bioinf8.vhio.org"
       MaxTime: "INFINITE"
       State: "UP"
       PriorityTier: "100"
@@ -13,20 +13,20 @@
       AllowAccounts: ""
 
   tasks:
-    # === FASE 1 - MODIFICACIÓN DE CONFIGURACIÓN (en todos los nodos) ===
-    - name: Verificar slurm.conf
+    # === FASE 1 - MODIFICACIÓN DE CONFIGURACIÓN ===
+    - name: Verificar existencia de slurm.conf
       stat:
         path: /etc/slurm/slurm.conf
       register: slurm_conf
 
-    - name: Obtener configuración actual
+    - name: Obtener configuración actual de la partición
       shell: |
         grep -P "^(#?\s*PartitionName={{ partition_name }}\b)" /etc/slurm/slurm.conf || echo "no_encontrado"
       register: linea_actual
       changed_when: false
       when: slurm_conf.stat.exists
 
-    - name: Construir nueva configuración
+    - name: Construir nueva línea de configuración
       set_fact:
         nueva_linea: >-
           {% set is_commented = linea_actual.stdout is match('^#') %}{% if is_commented %}# {% endif %}PartitionName={{ partition_name }}
@@ -35,7 +35,7 @@
         - slurm_conf.stat.exists
         - "'no_encontrado' not in linea_actual.stdout"
 
-    - name: Aplicar cambios
+    - name: Aplicar cambios en slurm.conf
       replace:
         path: /etc/slurm/slurm.conf
         regexp: "^{{ linea_actual.stdout | regex_escape() }}$"
@@ -44,23 +44,28 @@
         - slurm_conf.stat.exists
         - nueva_linea is defined
       register: cambio_realizado
-      notify: Reiniciar SLURM  # Solo se activará en workers
+      notify: Reiniciar SLURM
 
-    # === FASE 2 - RESULTADOS ===
-    - name: Mostrar resumen
+    # === FASE 2 - VERIFICACIÓN ===
+    - name: Mostrar resumen detallado
       debug:
         msg: |-
-          [{{ inventory_hostname }}] 
-          Estado: {% if cambio_realizado.changed %}MODIFICADO{% else %}OK (sin cambios){% endif %}
-          Config: {{ nueva_linea | trim | default('No modificado') }}
-      when: slurm_conf.stat.exists
+          === RESULTADO EN {{ inventory_hostname }} ===
+          {% if 'no_encontrado' in linea_actual.stdout %}
+          ❌ ERROR: Partición no encontrada
+          {% elif cambio_realizado.changed %}
+          ✅ CONFIG MODIFICADA:
+          {{ nueva_linea | trim }}
+          {% else %}
+          ℹ️ Configuración ya actualizada
+          {% endif %}
 
   handlers:
-    # === REINICIO EXCLUSIVO PARA WORKERS ===
     - name: Reiniciar SLURM
       command: systemctl restart slurmctld
       when: >
-        # Excluye MASTER en cualquier formato de nombre
-        "'mdrvpremst01' not in inventory_hostname and 
-         'mdrvpremst01.' not in inventory_hostname"
+        not (
+          'mdrvpremst01' in inventory_hostname or
+          'mdrvpremst01.' in inventory_hostname
+        )
       listen: Reiniciar SLURM
