@@ -1,0 +1,80 @@
+---
+- name: "Modificación de slurm.conf con reinicio controlado"
+  hosts: all
+  become: yes
+  vars:
+    partition_name: "interactive"
+    config_completa:
+      Nodes: "bioinf3.vhio.org,bioinf4.vhio.org,bioinf5.vhio.org,bioinf8.vhio.org"
+      MaxTime: "INFINITE"
+      State: "UP"
+      PriorityTier: "100"
+      AllowGroups: ""
+      AllowAccounts: ""
+
+  # === BLOQUE DE SEGURIDAD CRÍTICO ===
+  pre_tasks:
+    - name: "VALIDACIÓN: Bloquear ejecución en MASTER (mdrvpremst01)"
+      fail:
+        msg: "ERROR: Este playbook NO debe ejecutarse en el nodo MASTER"
+      when: >
+        "'mdrvpremst01' in inventory_hostname or 
+         'mdrvpremst01.' in inventory_hostname"
+
+  tasks:
+    # === FASE 1 - MODIFICACIÓN DE CONFIGURACIÓN ===
+    - name: Verificar existencia de slurm.conf
+      stat:
+        path: /etc/slurm/slurm.conf
+      register: slurm_conf
+
+    - name: Obtener configuración actual de la partición
+      shell: |
+        grep -P "^(#?\s*PartitionName={{ partition_name }}\b)" /etc/slurm/slurm.conf || echo "no_encontrado"
+      register: linea_actual
+      changed_when: false
+      when: slurm_conf.stat.exists
+
+    - name: Construir nueva línea de configuración
+      set_fact:
+        nueva_linea: >-
+          {% set is_commented = linea_actual.stdout is match('^#') %}{% if is_commented %}# {% endif %}PartitionName={{ partition_name }}
+          {% for param, value in config_completa.items() %}{% if value %}{{ param }}={{ value }} {% endif %}{% endfor %}
+      when: 
+        - slurm_conf.stat.exists
+        - "'no_encontrado' not in linea_actual.stdout"
+
+    - name: Aplicar cambios en slurm.conf
+      replace:
+        path: /etc/slurm/slurm.conf
+        regexp: "^{{ linea_actual.stdout | regex_escape() }}$"
+        replace: "{{ nueva_linea | trim }}"
+      when: 
+        - slurm_conf.stat.exists
+        - nueva_linea is defined
+      register: cambio_realizado
+      notify: Reiniciar SLURM  # Handler que se activa sólo si hay cambios
+
+    # === FASE 2 - VERIFICACIÓN POSTERIOR ===
+    - name: Mostrar resumen detallado
+      debug:
+        msg: |-
+          === RESULTADO EN {{ inventory_hostname }} ===
+          {% if 'no_encontrado' in linea_actual.stdout %}
+          ❌ ERROR: Partición '{{ partition_name }}' no encontrada
+          {% elif cambio_realizado.changed %}
+          ✅ ÉXITO: Configuración actualizada
+          {{ nueva_linea | trim }}
+          {% else %}
+          ℹ️ INFO: La configuración ya estaba actualizada
+          {% endif %}
+      when: slurm_conf.stat.exists
+
+  handlers:
+    # === REINICIO SEGURO (EXCLUYE MASTER AUTOMÁTICAMENTE) ===
+    - name: Reiniciar SLURM
+      command: systemctl restart slurmctld
+      when: >
+        "'mdrvpremst01' not in inventory_hostname and 
+         'mdrvpremst01.' not in inventory_hostname"
+      listen: Reiniciar SLURM
