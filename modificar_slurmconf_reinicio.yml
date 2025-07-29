@@ -1,6 +1,6 @@
 ---
 - name: "Modificación de slurm.conf con reinicio controlado"
-  hosts: all
+  hosts: all  # Se ejecuta en todos los nodos
   become: yes
   vars:
     partition_name: "interactive"
@@ -12,30 +12,21 @@
       AllowGroups: ""
       AllowAccounts: ""
 
-  # === BLOQUE DE SEGURIDAD CRÍTICO ===
-  pre_tasks:
-    - name: "VALIDACIÓN: Bloquear ejecución en MASTER (mdrvpremst01)"
-      fail:
-        msg: "ERROR: Este playbook NO debe ejecutarse en el nodo MASTER"
-      when: >
-        "'mdrvpremst01' in inventory_hostname or 
-         'mdrvpremst01.' in inventory_hostname"
-
   tasks:
-    # === FASE 1 - MODIFICACIÓN DE CONFIGURACIÓN ===
-    - name: Verificar existencia de slurm.conf
+    # === FASE 1 - MODIFICACIÓN DE CONFIGURACIÓN (en todos los nodos) ===
+    - name: Verificar slurm.conf
       stat:
         path: /etc/slurm/slurm.conf
       register: slurm_conf
 
-    - name: Obtener configuración actual de la partición
+    - name: Obtener configuración actual
       shell: |
         grep -P "^(#?\s*PartitionName={{ partition_name }}\b)" /etc/slurm/slurm.conf || echo "no_encontrado"
       register: linea_actual
       changed_when: false
       when: slurm_conf.stat.exists
 
-    - name: Construir nueva línea de configuración
+    - name: Construir nueva configuración
       set_fact:
         nueva_linea: >-
           {% set is_commented = linea_actual.stdout is match('^#') %}{% if is_commented %}# {% endif %}PartitionName={{ partition_name }}
@@ -44,7 +35,7 @@
         - slurm_conf.stat.exists
         - "'no_encontrado' not in linea_actual.stdout"
 
-    - name: Aplicar cambios en slurm.conf
+    - name: Aplicar cambios
       replace:
         path: /etc/slurm/slurm.conf
         regexp: "^{{ linea_actual.stdout | regex_escape() }}$"
@@ -53,28 +44,23 @@
         - slurm_conf.stat.exists
         - nueva_linea is defined
       register: cambio_realizado
-      notify: Reiniciar SLURM  # Handler que se activa sólo si hay cambios
+      notify: Reiniciar SLURM  # Solo se activará en workers
 
-    # === FASE 2 - VERIFICACIÓN POSTERIOR ===
-    - name: Mostrar resumen detallado
+    # === FASE 2 - RESULTADOS ===
+    - name: Mostrar resumen
       debug:
         msg: |-
-          === RESULTADO EN {{ inventory_hostname }} ===
-          {% if 'no_encontrado' in linea_actual.stdout %}
-          ❌ ERROR: Partición '{{ partition_name }}' no encontrada
-          {% elif cambio_realizado.changed %}
-          ✅ ÉXITO: Configuración actualizada
-          {{ nueva_linea | trim }}
-          {% else %}
-          ℹ️ INFO: La configuración ya estaba actualizada
-          {% endif %}
+          [{{ inventory_hostname }}] 
+          Estado: {% if cambio_realizado.changed %}MODIFICADO{% else %}OK (sin cambios){% endif %}
+          Config: {{ nueva_linea | trim | default('No modificado') }}
       when: slurm_conf.stat.exists
 
   handlers:
-    # === REINICIO SEGURO (EXCLUYE MASTER AUTOMÁTICAMENTE) ===
+    # === REINICIO EXCLUSIVO PARA WORKERS ===
     - name: Reiniciar SLURM
       command: systemctl restart slurmctld
       when: >
+        # Excluye MASTER en cualquier formato de nombre
         "'mdrvpremst01' not in inventory_hostname and 
          'mdrvpremst01.' not in inventory_hostname"
       listen: Reiniciar SLURM
