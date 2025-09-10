@@ -1,0 +1,253 @@
+- name: Limpieza automática de /tmp con requeue forzado y notificaciones
+  hosts: all
+  become: yes
+  gather_facts: no
+  vars:
+    ansible_become_exe: "sudo -n"
+    ansible_become_flags: ""
+    mtime_days: 1
+    max_wait_hours: 24  # 24 horas máximo de espera
+    check_interval_minutes: 30  # Verificación cada 30 minutos
+    systemd_paths:
+      - "/tmp/systemd-*"
+      - "/tmp/.font-unix*"
+      - "/tmp/.ICE-unix*" 
+      - "/tmp/.Test-unix*"
+      - "/tmp/.X11-unix*"
+      - "/tmp/.XIM-unix*"
+      - "/tmp/snap-private-tmp*"
+    
+  tasks:
+    - name: Obtener hostname completo
+      command: hostname -f
+      register: hostname_full
+      changed_when: false
+      
+    - name: Verificar jobs corriendo en SLURM
+      shell: squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j" 2>/dev/null
+      register: running_jobs
+      changed_when: false
+      failed_when: false
+      
+    - name: Extraer lista de job IDs y información
+      set_fact:
+        job_info: "{{ running_jobs.stdout_lines }}"
+      when: running_jobs.stdout != ""
+      
+    - name: Drainear nodo si hay jobs
+      shell: |
+        scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Limpieza /tmp programada - REQUEUE en {{ max_wait_hours }}h" || true
+      when: job_info | default([]) | length > 0
+      register: drain_result
+      failed_when: false
+      
+    - name: Notificar a usuarios sobre el mantenimiento
+      shell: |
+        # Crear mensaje de notificación
+        cat > /tmp/maintenance_notification.txt << EOF
+        Estimado usuario,
+        
+        Su job SLURM en el nodo {{ hostname_full.stdout }} será afectado por mantenimiento programado.
+        
+        INFORMACIÓN:
+        - Nodo: {{ hostname_full.stdout }}
+        - Hora de inicio: $(date)
+        - Tiempo máximo de espera: {{ max_wait_hours }} horas
+        - Acción: REQUEUE automático si no completa en {{ max_wait_hours }}h
+        
+        Su job será movido automáticamente a otro nodo si no completa en el tiempo establecido.
+        
+        Atentamente,
+        Administración del Cluster
+        EOF
+        
+        # Enviar notificación a cada usuario afectado
+        {% for job_line in job_info %}
+        jobid=$(echo "{{ job_line }}" | cut -d: -f1)
+        user=$(echo "{{ job_line }}" | cut -d: -f2)
+        jobname=$(echo "{{ job_line }}" | cut -d: -f3)
+        echo "Notificando a $user sobre job $jobid ($jobname)"
+        mail -s "Mantenimiento programado en {{ hostname_full.stdout }} - Job $jobname" $user@dominio.com < /tmp/maintenance_notification.txt
+        {% endfor %}
+        
+        # Limpiar archivo temporal
+        rm -f /tmp/maintenance_notification.txt
+      args:
+        executable: /bin/bash
+      when: job_info | default([]) | length > 0
+      register: notification_result
+      failed_when: false
+      
+    - name: Esperar máximo 24 horas para que terminen los jobs (verificación cada 30 min)
+      shell: squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j" 2>/dev/null
+      register: remaining_jobs
+      until: remaining_jobs.stdout == ""
+      retries: "{{ (max_wait_hours * 60) / check_interval_minutes | int }}"  # 24h en intervalos de 30min
+      delay: "{{ check_interval_minutes * 60 }}"  # 30 minutos en segundos
+      when: job_info | default([]) | length > 0
+      
+    - name: Notificar requeue inminente (15 minutos antes)
+      shell: |
+        cat > /tmp/requeue_warning.txt << EOF
+        URGENTE: Su job en {{ hostname_full.stdout }} será requeueado en 15 minutos
+        
+        Job(s) afectado(s):
+        {{ remaining_jobs.stdout }}
+        
+        Si su job no completa en los próximos 15 minutos, será movido automáticamente a otro nodo.
+        EOF
+        
+        # Enviar notificación urgente
+        {% for job_line in remaining_jobs.stdout_lines %}
+        user=$(echo "{{ job_line }}" | cut -d: -f2)
+        jobname=$(echo "{{ job_line }}" | cut -d: -f3)
+        mail -s "URGENTE: Requeue inminente para job $jobname" $user@dominio.com < /tmp/requeue_warning.txt
+        {% endfor %}
+        
+        rm -f /tmp/requeue_warning.txt
+      args:
+        executable: /bin/bash
+      when: 
+        - job_info | default([]) | length > 0
+        - remaining_jobs.attempt == (remaining_jobs.retries - 1)  # Último intento menos uno
+      register: final_warning
+      failed_when: false
+      
+    - name: Forzar requeue de jobs pendientes después de 24h
+      shell: |
+        # Cancelar jobs con requeue flag
+        for job_line in $(squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j" 2>/dev/null); do
+          jobid=$(echo $job_line | cut -d: -f1)
+          user=$(echo $job_line | cut -d: -f2)
+          jobname=$(echo $job_line | cut -d: -f3)
+          
+          echo "Requeueando job $jobid ($jobname) de usuario $user"
+          scancel --requeue $jobid
+        done
+      args:
+        executable: /bin/bash
+      when: 
+        - job_info | default([]) | length > 0
+        - remaining_jobs is defined and remaining_jobs.stdout != ""
+      register: requeue_result
+      failed_when: false
+      
+    - name: Esperar breve momento para que los jobs se requeuen
+      pause:
+        minutes: 2
+      when: requeue_result is defined and requeue_result.changed
+      
+    - name: Buscar archivos antiguos para eliminar (sin .time)
+      shell: |
+        find /tmp -type f -mtime +{{ mtime_days }} \
+        ! -name "*.time" \
+        ! -name "aquota.user" \
+        ! -name "aquota.group" \
+        ! -name "krb5cc*" \
+        ! -path "/tmp/systemd-*" \
+        ! -path "/tmp/.font-unix*" \
+        ! -path "/tmp/.ICE-unix*" \
+        ! -path "/tmp/.Test-unix*" \
+        ! -path "/tmp/.X11-unix*" \
+        ! -path "/tmp/.XIM-unix*" \
+        ! -path "/tmp/snap-private-tmp*" | wc -l
+      register: old_files_count
+      become: yes
+      
+    - name: Eliminar archivos antiguos directamente
+      shell: |
+        find /tmp -type f -mtime +{{ mtime_days }} \
+        ! -name "*.time" \
+        ! -name "aquota.user" \
+        ! -name "aquota.group" \
+        ! -name "krb5cc*" \
+        ! -path "/tmp/systemd-*" \
+        ! -path "/tmp/.font-unix*" \
+        ! -path "/tmp/.ICE-unix*" \
+        ! -path "/tmp/.Test-unix*" \
+        ! -path "/tmp/.X11-unix*" \
+        ! -path "/tmp/.XIM-unix*" \
+        ! -path "/tmp/snap-private-tmp*" \
+        -delete 2>/dev/null || true
+      register: delete_files_result
+      become: yes
+      when: old_files_count.stdout|int > 0
+      failed_when: false
+      
+    - name: Buscar directorios antiguos para eliminar
+      shell: |
+        find /tmp -type d -mtime +{{ mtime_days }} \
+        ! -path "/tmp/systemd-*" \
+        ! -path "/tmp/.font-unix*" \
+        ! -path "/tmp/.ICE-unix*" \
+        ! -path "/tmp/.Test-unix*" \
+        ! -path "/tmp/.X11-unix*" \
+        ! -path "/tmp/.XIM-unix*" \
+        ! -path "/tmp/snap-private-tmp*" \
+        ! -path "/tmp" | wc -l
+      register: old_dirs_count
+      become: yes
+      
+    - name: Eliminar directorios antiguos
+      shell: |
+        find /tmp -type d -mtime +{{ mtime_days }} \
+        ! -path "/tmp/systemd-*" \
+        ! -path "/tmp/.font-unix*" \
+        ! -path "/tmp/.ICE-unix*" \
+        ! -path "/tmp/.Test-unix*" \
+        ! -path "/tmp/.X11-unix*" \
+        ! -path "/tmp/.XIM-unix*" \
+        ! -path "/tmp/snap-private-tmp*" \
+        ! -path "/tmp" \
+        -exec rmdir {} + 2>/dev/null || true
+      register: delete_dirs_result
+      become: yes
+      when: old_dirs_count.stdout|int > 0
+      failed_when: false
+      
+    - name: Reactivar nodo
+      shell: |
+        scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
+      when: job_info | default([]) | length > 0
+      register: resume_result
+      failed_when: false
+      changed_when: resume_result.rc == 0
+      
+    - name: Notificar finalización del mantenimiento
+      shell: |
+        cat > /tmp/maintenance_complete.txt << EOF
+        Mantenimiento completado en {{ hostname_full.stdout }}
+        
+        El nodo ha sido reactivado y está disponible para nuevos jobs.
+        
+        Resumen:
+        - Jobs requeueados: {{ requeue_result.stdout_lines | default([]) | length if requeue_result is defined else 0 }}
+        - Archivos eliminados: {{ old_files_count.stdout }}
+        - Directorios eliminados: {{ old_dirs_count.stdout }}
+        
+        Hora de finalización: $(date)
+        EOF
+        
+        # Enviar notificación a administradores
+        mail -s "Mantenimiento completado en {{ hostname_full.stdout }}" admin@dominio.com < /tmp/maintenance_complete.txt
+        rm -f /tmp/maintenance_complete.txt
+      args:
+        executable: /bin/bash
+      when: job_info | default([]) | length > 0
+      register: completion_notification
+      failed_when: false
+      
+    - name: Mostrar uso final de /tmp
+      shell: df -h /tmp
+      register: final_usage
+      changed_when: false
+      
+    - name: Resultado final
+      debug:
+        msg:
+          - "Limpieza completada en {{ hostname_full.stdout }}"
+          - "Jobs encontrados inicialmente: {{ job_info | default([]) | length }}"
+          - "Jobs requeueados: {{ requeue_result.stdout_lines | default([]) | length if requeue_result is defined else 0 }}"
+          - "Archivos eliminados: {{ old_files_count.stdout }}"
+          - "Directorios eliminados: {{ old_dirs_count.stdout }}"
+          - "Uso final: {{ final_usage.stdout_lines[-1] }}"
