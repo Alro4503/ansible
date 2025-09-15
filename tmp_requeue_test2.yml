@@ -30,22 +30,26 @@
       register: drain_result
       failed_when: false
       
-    - name: Esperar máximo {{ max_wait_minutes }} minutos
+    - name: Configurar intentos de espera
+      set_fact:
+        max_attempts: "{{ (max_wait_minutes * 60 / check_interval_seconds) | int }}"
+      when: running_jobs.stdout != ""
+      
+    - name: Esperar máximo {{ max_wait_minutes }} minutos (con loop manual)
       shell: squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T:%N" 2>/dev/null
-      register: remaining_jobs
-      until: remaining_jobs.stdout == ""
-      retries: "{{ (max_wait_minutes * 60 / check_interval_seconds) | int }}"
+      register: current_jobs
+      until: current_jobs.stdout == ""
+      retries: "{{ max_attempts }}"
       delay: "{{ check_interval_seconds }}"
       when: running_jobs.stdout != ""
       ignore_errors: yes
-      register: wait_result
       
-    - name: Mostrar estado durante la espera
+    - name: Mostrar estado final de la espera
       debug:
-        msg: "Jobs pendientes en {{ hostname_full.stdout }}: {{ remaining_jobs.stdout_lines }}"
+        msg: "Jobs todavía corriendo después de la espera: {{ current_jobs.stdout_lines }}"
       when: 
         - running_jobs.stdout != ""
-        - remaining_jobs.stdout != ""
+        - current_jobs.stdout != ""
       
     - name: Forzar requeue de jobs pendientes (REAL)
       shell: |
@@ -60,14 +64,16 @@
         executable: /bin/bash
       when: 
         - running_jobs.stdout != ""
-        - remaining_jobs.stdout != ""
+        - current_jobs.stdout != ""
       register: requeue_result
       failed_when: false
       
     - name: Esperar 1 minuto para que SLURM procese el requeue
       pause:
         minutes: 1
-      when: requeue_result is defined and requeue_result.changed
+      when: 
+        - running_jobs.stdout != ""
+        - requeue_result is defined and requeue_result.changed
       
     - name: Verificar dónde está el job ahora
       shell: |
