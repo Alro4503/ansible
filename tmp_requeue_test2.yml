@@ -23,33 +23,32 @@
       debug:
         msg: "Jobs encontrados en {{ hostname_full.stdout }}: {{ running_jobs.stdout_lines }}"
         
+    - name: Salir si no hay jobs
+      meta: end_play
+      when: running_jobs.stdout == ""
+      
     - name: Drainear nodo (REAL)
       shell: |
         scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Prueba de requeue - timeout {{ max_wait_minutes }}min"
-      when: running_jobs.stdout != ""
       register: drain_result
       failed_when: false
       
     - name: Configurar intentos de espera
       set_fact:
         max_attempts: "{{ (max_wait_minutes * 60 / check_interval_seconds) | int }}"
-      when: running_jobs.stdout != ""
       
-    - name: Esperar máximo {{ max_wait_minutes }} minutos (con loop manual)
+    - name: Esperar máximo {{ max_wait_minutes }} minutos
       shell: squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T:%N" 2>/dev/null
       register: current_jobs
       until: current_jobs.stdout == ""
       retries: "{{ max_attempts }}"
       delay: "{{ check_interval_seconds }}"
-      when: running_jobs.stdout != ""
       ignore_errors: yes
       
     - name: Mostrar estado final de la espera
       debug:
         msg: "Jobs todavía corriendo después de la espera: {{ current_jobs.stdout_lines }}"
-      when: 
-        - running_jobs.stdout != ""
-        - current_jobs.stdout != ""
+      when: current_jobs.stdout != ""
       
     - name: Forzar requeue de jobs pendientes (REAL)
       shell: |
@@ -62,26 +61,22 @@
         done
       args:
         executable: /bin/bash
-      when: 
-        - running_jobs.stdout != ""
-        - current_jobs.stdout != ""
+      when: current_jobs.stdout != ""
       register: requeue_result
       failed_when: false
       
     - name: Esperar 1 minuto para que SLURM procese el requeue
       pause:
         minutes: 1
-      when: 
-        - running_jobs.stdout != ""
-        - requeue_result is defined and requeue_result.changed
+      when: requeue_result is defined
       
     - name: Verificar dónde está el job ahora
       shell: |
-        # Buscar el job que estaba originalmente en este nodo
-        original_job_id={{ (running_jobs.stdout_lines[0].split(':'))[0] }}
-        squeue -j $original_job_id -o "%i:%j:%N:%T" 2>/dev/null || echo "Job no encontrado"
-      when: running_jobs.stdout != ""
+        # Buscar el job original
+        original_job_id="{{ running_jobs.stdout_lines[0].split(':')[0] }}"
+        squeue -j $original_job_id -o "%i:%j:%N:%T" 2>/dev/null || echo "Job_no_encontrado"
       register: job_after_requeue
+      failed_when: false
       
     - name: Mostrar estado final del job
       debug:
@@ -90,7 +85,6 @@
     - name: Reactivar nodo (REAL)
       shell: |
         scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
-      when: running_jobs.stdout != ""
       register: resume_result
       failed_when: false
       
@@ -101,4 +95,4 @@
           - "Jobs iniciales: {{ running_jobs.stdout_lines }}"
           - "Jobs requeueados: {{ requeue_result.stdout if requeue_result is defined else 'Ninguno' }}"
           - "Nuevo estado del job: {{ job_after_requeue.stdout }}"
-          - "Nodo reactivado: {{ resume_result.rc == 0 }}"
+          - "Nodo reactivado: {{ 'Sí' if resume_result.rc == 0 else 'No' }}"
