@@ -38,11 +38,14 @@
       delay: "{{ check_interval_seconds }}"
       when: running_jobs.stdout != ""
       ignore_errors: yes
+      register: wait_result
       
     - name: Mostrar estado durante la espera
       debug:
-        msg: "Intento {{ remaining_jobs.attempt }}/{{ remaining_jobs.retries }} - Jobs pendientes en {{ hostname_full.stdout }}: {{ remaining_jobs.stdout_lines }}"
-      when: running_jobs.stdout != ""
+        msg: "Jobs pendientes en {{ hostname_full.stdout }}: {{ remaining_jobs.stdout_lines }}"
+      when: 
+        - running_jobs.stdout != ""
+        - remaining_jobs.stdout != ""
       
     - name: Forzar requeue de jobs pendientes (REAL)
       shell: |
@@ -57,7 +60,7 @@
         executable: /bin/bash
       when: 
         - running_jobs.stdout != ""
-        - remaining_jobs is defined and remaining_jobs.stdout != ""
+        - remaining_jobs.stdout != ""
       register: requeue_result
       failed_when: false
       
@@ -90,6 +93,6 @@
         msg:
           - "PRUEBA COMPLETADA en {{ hostname_full.stdout }}"
           - "Jobs iniciales: {{ running_jobs.stdout_lines }}"
-          - "Jobs requeueados: {{ requeue_result.stdout_lines if requeue_result is defined else 'Ninguno' }}"
+          - "Jobs requeueados: {{ requeue_result.stdout if requeue_result is defined else 'Ninguno' }}"
           - "Nuevo estado del job: {{ job_after_requeue.stdout }}"
           - "Nodo reactivado: {{ resume_result.rc == 0 }}"
