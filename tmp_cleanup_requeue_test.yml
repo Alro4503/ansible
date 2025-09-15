@@ -4,7 +4,7 @@
   gather_facts: no
   vars:
     ansible_become_exe: "sudo -n"
-    max_wait_minutes: 10  # 10 minutos máximo para prueba
+    max_wait_minutes: 5  # 10 minutos máximo para prueba
     check_interval_minutes: 2  # Verificación cada 2 minutos
     test_mode: true  # Modo prueba - no elimina archivos reales
     
