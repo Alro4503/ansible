@@ -1,144 +1,80 @@
-- name: PRUEBA RÁPIDA - Limpieza /tmp con requeue forzado
+- name: PRUEBA - Limpieza automática de /tmp con requeue
   hosts: all
   become: yes
   gather_facts: no
   vars:
     ansible_become_exe: "sudo -n"
-    ansible_become_flags: ""
-    mtime_days: 1
-    max_wait_minutes: 5  # ⚡ 5 minutos máximo de espera (instead de 24h)
-    check_interval_seconds: 30  # ⚡ Verificar cada 30 segundos
-    test_mode: true  # ⚡ Modo prueba - sin limpieza real de /tmp
+    max_wait_minutes: 10  # 10 minutos máximo para prueba
+    check_interval_minutes: 2  # Verificación cada 2 minutos
+    test_mode: true  # Modo prueba - no elimina archivos reales
     
   tasks:
-    # ==================== FASE 1: DETECCIÓN Y PREPARACIÓN ====================
-    - name: Obtener hostname completo del nodo
+    - name: Obtener hostname completo
       command: hostname -f
       register: hostname_full
       changed_when: false
       
-    - name: Identificar jobs corriendo en este nodo
+    - name: Verificar jobs corriendo en SLURM
       shell: squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T" 2>/dev/null
       register: running_jobs
       changed_when: false
       failed_when: false
       
-    - name: Mostrar jobs encontrados para debugging
+    - name: Mostrar jobs encontrados
       debug:
-        msg: 
-          - "🔍 NODO: {{ hostname_full.stdout }}"
-          - "📊 JOBS ENCONTRADOS: {{ running_jobs.stdout_lines | length }}"
-          - "📝 DETALLES: {{ running_jobs.stdout_lines }}"
+        msg: "Jobs encontrados: {{ running_jobs.stdout_lines }}"
+        
+    - name: Drainear nodo en modo prueba
+      shell: |
+        echo "MODO PRUEBA: Simulando drain del nodo {{ hostname_full.stdout }}"
+        echo "Comando real: scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason='Prueba de mantenimiento'"
+      when: running_jobs.stdout != ""
+      register: drain_result
+      
+    - name: Esperar máximo 10 minutos para que terminen los jobs
+      shell: squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T" 2>/dev/null
+      register: remaining_jobs
+      until: remaining_jobs.stdout == ""
+      retries: "{{ (max_wait_minutes / check_interval_minutes) | int }}"
+      delay: "{{ check_interval_minutes * 60 }}"
       when: running_jobs.stdout != ""
       
-    - name: Salir si no hay jobs (nada que hacer)
-      meta: end_play
-      when: running_jobs.stdout == ""
-      
-    # ==================== FASE 2: DRAIN Y ESPERA ====================
-    - name: Poner nodo en estado DRAIN
-      shell: |
-        scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="PRUEBA REQUEUE - 5min timeout" || true
-      register: drain_result
-      failed_when: false
-      
-    - name: Notificación de inicio de prueba
+    - name: Mostrar estado durante la espera
       debug:
-        msg:
-          - "⏰ INICIANDO PRUEBA DE REQUEUE"
-          - "🕐 Tiempo máximo de espera: {{ max_wait_minutes }} minutos"
-          - "🔁 Verificación cada {{ check_interval_seconds }} segundos"
-          - "📋 Jobs a monitorear: {{ running_jobs.stdout_lines }}"
-          
-    - name: Esperar tiempo limitado (5 minutos máximo)
-      shell: squeue -h -w {{ hostname_full.stdout }} -o "%i" 2>/dev/null
-      register: remaining_jobs
-      until: remaining_jobs.stdout == ""  # Hasta que no queden jobs
-      retries: "{{ (max_wait_minutes * 60) / check_interval_seconds | int }}"  # 5min en intervalos de 30s
-      delay: "{{ check_interval_seconds }}"  # 30 segundos entre intentos
+        msg: "Intento {{ remaining_jobs.attempt }}/{{ remaining_jobs.retries }} - Jobs pendientes: {{ remaining_jobs.stdout_lines }}"
+      when: running_jobs.stdout != ""
       
-    - name: Mostrar progreso de la espera
-      debug:
-        msg: 
-          - "⏳ Intento {{ remaining_jobs.attempt }}/{{ remaining_jobs.retries }}"
-          - "📊 Jobs restantes: {{ remaining_jobs.stdout_lines | length }}"
-          - "🔍 Detalles: {{ remaining_jobs.stdout_lines }}"
-      when: remaining_jobs.attempt > 1
-      
-    # ==================== FASE 3: REQUEUE FORZADO ====================
-    - name: Forzar requeue de jobs pendientes después del timeout
+    - name: Simular requeue de jobs pendientes
       shell: |
-        echo "🚀 INICIANDO REQUEUE FORZADO"
-        echo "📋 Jobs pendientes:"
-        squeue -w {{ hostname_full.stdout }} -o "%.15i %.12u %.20j %.12T" 2>/dev/null || true
-        
-        # Requeuear cada job individualmente
-        for jobid in $(squeue -h -w {{ hostname_full.stdout }} -o "%i" 2>/dev/null); do
-          echo "🔄 Requeueando job $jobid..."
-          scancel --requeue $jobid
-          sleep 2  # Pequeña pausa entre jobs
-        done
-        
-        echo "✅ Requeue completado"
-      args:
-        executable: /bin/bash
-      when: remaining_jobs.stdout != ""  # Solo si todavía hay jobs
-      register: requeue_result
-      failed_when: false
-      
-    - name: Esperar 1 minuto para que SLURM procese el requeue
-      pause:
-        minutes: 1
-      when: requeue_result is defined
-      
-    # ==================== FASE 4: VERIFICACIÓN ====================
-    - name: Verificar estado posterior al requeue
-      shell: |
-        echo "📊 ESTADO FINAL EN ESTE NODO:"
-        squeue -w {{ hostname_full.stdout }} -o "%.15i %.12u %.20j %.12T" 2>/dev/null || echo "✅ No hay jobs en este nodo"
-        
-        echo ""
-        echo "🌍 JOBS DEL USUARIO EN OTROS NODOS:"
-        # Buscar jobs del mismo usuario en otros nodos
-        for job_line in "{{ running_jobs.stdout_lines }}"; do
+        echo "MODO PRUEBA: Simulando requeue de jobs"
+        for job_line in $(squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T" 2>/dev/null); do
+          jobid=$(echo $job_line | cut -d: -f1)
           user=$(echo $job_line | cut -d: -f2)
-          squeue -u $user -o "%.15i %.12u %.20j %.12N %.12T" 2>/dev/null || true
+          jobname=$(echo $job_line | cut -d: -f3)
+          state=$(echo $job_line | cut -d: -f4)
+          
+          echo "SIMULACIÓN: Requeueando job $jobid ($jobname) de usuario $user (estado: $state)"
+          echo "Comando real: scancel --requeue $jobid"
         done
       args:
         executable: /bin/bash
-      register: final_verification
+      when: 
+        - running_jobs.stdout != ""
+        - remaining_jobs is defined and remaining_jobs.stdout != ""
+      register: requeue_result
       
-    # ==================== FASE 5: LIMPIEZA (OPCIONAL EN PRUEBA) ====================
-    - name: Simular limpieza de /tmp (modo prueba)
-      debug:
-        msg: 
-          - "🧹 MODO PRUEBA: Limpieza de /tmp desactivada"
-          - "📁 Se simularía eliminación de archivos > {{ mtime_days }} días"
-          - "⚡ Para limpieza real, cambiar test_mode: false"
-      when: test_mode
-      
-    - name: Limpieza real de /tmp (si se desactiva test_mode)
+    - name: Simular reactivación del nodo
       shell: |
-        find /tmp -type f -mtime +{{ mtime_days }} -delete 2>/dev/null || true
-        find /tmp -type d -mtime +{{ mtime_days }} -exec rmdir {} + 2>/dev/null || true
-      when: not test_mode
-      register: cleanup_result
-      failed_when: false
-      
-    # ==================== FASE 6: REACTIVACIÓN Y REPORTE ====================
-    - name: Reactivar el nodo
-      shell: |
-        scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
+        echo "MODO PRUEBA: Simulando reactivación del nodo"
+        echo "Comando real: scontrol update NodeName={{ hostname_full.stdout }} State=RESUME"
+      when: running_jobs.stdout != ""
       register: resume_result
-      failed_when: false
       
-    - name: Resultado final de la prueba
+    - name: Resultado de la prueba
       debug:
         msg:
-          - "🎉 PRUEBA DE REQUEUE COMPLETADA"
-          - "📋 Nodo: {{ hostname_full.stdout }}"
-          - "🔢 Jobs iniciales: {{ running_jobs.stdout_lines | length }}"
-          - "🔄 Jobs requeueados: {{ requeue_result.stdout_lines | length if requeue_result is defined else '0' }}"
-          - "⏱️  Tiempo de espera: {{ max_wait_minutes }} minutos"
-          - "✅ Estado final: {{ final_verification.stdout }}"
-          - "🔧 Nodo reactivado: {{ resume_result.rc == 0 | ternary('SI','NO') }}"
+          - "PRUEBA COMPLETADA en {{ hostname_full.stdout }}"
+          - "Jobs encontrados inicialmente: {{ running_jobs.stdout_lines | length }}"
+          - "Jobs pendientes al final: {{ remaining_jobs.stdout_lines | default([]) | length }}"
+          - "Tiempo máximo de espera: {{ max_wait_minutes }} minutos"
+          - "MODO PRUEBA: No se ejecutaron comandos reales de SLURM"
