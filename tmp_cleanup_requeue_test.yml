@@ -1,75 +1,55 @@
 - name: PRUEBA - Limpieza automática de /tmp con requeue
-  hosts: all # bioinfpre3.vhio.org
+  hosts: all
   become: yes
   gather_facts: no
   vars:
     ansible_become_exe: "sudo -n"
-    max_wait_minutes: 10  # 10 minutos máximo para prueba
-    check_interval_minutes: 2  # Verificación cada 2 minutos
-    test_mode: true  # Modo prueba - no elimina archivos reales
+    max_wait_minutes: 10
+    check_interval_minutes: 2
+    test_mode: true
     
   tasks:
-    - name: Obtener nombre corto del host (como lo ve SLURM)
-      shell: hostname -s
-      register: hostname_short
+    - name: Obtener hostname completo (como lo ve SLURM)
+      shell: hostname -f
+      register: hostname_full
       changed_when: false
       
     - name: Verificar jobs corriendo en SLURM
-      shell: squeue -h -w {{ hostname_short.stdout }} -o "%i:%u:%j:%T:%N" 2>/dev/null
+      shell: squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T:%N" 2>/dev/null
       register: running_jobs
       changed_when: false
       failed_when: false
       
-    - name: Mostrar jobs encontrados
-      debug:
-        msg: "Jobs encontrados en {{ hostname_short.stdout }}: {{ running_jobs.stdout_lines }}"
-        
-    - name: Simular drain del nodo (modo prueba)
-      debug:
-        msg: "MODO PRUEBA: Simulando drain del nodo {{ hostname_short.stdout }}"
-      when: running_jobs.stdout != ""
-      
-    - name: Esperar máximo 10 minutos para que terminen los jobs
-      shell: squeue -h -w {{ hostname_short.stdout }} -o "%i:%u:%j:%T:%N" 2>/dev/null
-      register: remaining_jobs
-      until: remaining_jobs.stdout == ""
-      retries: 5  # 5 intentos (10 minutos con delay de 2 minutos)
-      delay: 120  # 120 segundos = 2 minutos
-      when: running_jobs.stdout != ""
-      
-    - name: Mostrar estado final de la espera
-      debug:
-        msg: "Después de {{ max_wait_minutes }} minutos - Jobs pendientes: {{ remaining_jobs.stdout_lines }}"
-      when: running_jobs.stdout != ""
-      
-    - name: Simular requeue de jobs pendientes
-      debug:
-        msg: "MODO PRUEBA: Simulando requeue de jobs {{ remaining_jobs.stdout_lines }}"
-      when: 
-        - running_jobs.stdout != ""
-        - remaining_jobs.stdout != ""
-      
-    - name: Simular reactivación del nodo
-      debug:
-        msg: "MODO PRUEBA: Simulando reactivación del nodo {{ hostname_short.stdout }}"
-      when: running_jobs.stdout != ""
-      
-    - name: Simular limpieza de /tmp (solo muestra)
-      shell: |
-        echo "MODO PRUEBA: Simulando limpieza de /tmp"
-        find /tmp -type f -mtime +1 -name "*.tmp" 2>/dev/null | head -5 || true
-      register: tmp_cleanup_simulation
-      changed_when: false
-      
-    - name: Mostrar archivos que se eliminarían
-      debug:
-        msg: "Archivos antiguos encontrados: {{ tmp_cleanup_simulation.stdout_lines }}"
-        
-    - name: Resultado final de la prueba
+    - name: Mostrar información del nodo
       debug:
         msg:
-          - "PRUEBA COMPLETADA en {{ hostname_short.stdout }}"
-          - "Jobs encontrados inicialmente: {{ running_jobs.stdout_lines | length }}"
-          - "Jobs pendientes al final: {{ remaining_jobs.stdout_lines | default([]) | length }}"
-          - "Tiempo de espera: {{ max_wait_minutes }} minutos"
-          - "MODO PRUEBA: No se ejecutaron comandos reales de SLURM"
+          - "Hostname corto: {{ hostname_full.stdout }}"
+          - "Jobs encontrados: {{ running_jobs.stdout_lines }}"
+          - "Número de jobs: {{ running_jobs.stdout_lines | length }}"
+        
+    - name: Verificar conexión con SLURM
+      shell: which squeue && echo "SLURM disponible" || echo "SLURM no disponible"
+      register: slurm_check
+      changed_when: false
+      
+    - name: Mostrar estado de SLURM
+      debug:
+        msg: "Estado SLURM: {{ slurm_check.stdout }}"
+        
+    - name: Verificar nodo en SLURM
+      shell: scontrol show node {{ hostname_full.stdout }} 2>/dev/null | head -5 || echo "Nodo no encontrado en SLURM"
+      register: node_check
+      changed_when: false
+      
+    - name: Mostrar información del nodo SLURM
+      debug:
+        msg: "Información SLURM: {{ node_check.stdout }}"
+      
+    - name: Listar TODOS los jobs en el cluster
+      shell: squeue -o "%i:%j:%N:%T:%u" 2>/dev/null | head -10
+      register: all_jobs
+      changed_when: false
+      
+    - name: Mostrar todos los jobs
+      debug:
+        msg: "Todos los jobs en cluster: {{ all_jobs.stdout_lines }}"
