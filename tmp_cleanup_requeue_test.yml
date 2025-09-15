@@ -1,5 +1,5 @@
 - name: PRUEBA - Limpieza automática de /tmp con requeue
-  hosts: all
+  hosts: all # bioinfpre3.vhio.org
   become: yes
   gather_facts: no
   vars:
@@ -9,72 +9,67 @@
     test_mode: true  # Modo prueba - no elimina archivos reales
     
   tasks:
-    - name: Obtener hostname completo
-      command: hostname -f
-      register: hostname_full
+    - name: Obtener nombre corto del host (como lo ve SLURM)
+      shell: hostname -s
+      register: hostname_short
       changed_when: false
       
     - name: Verificar jobs corriendo en SLURM
-      shell: squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T" 2>/dev/null
+      shell: squeue -h -w {{ hostname_short.stdout }} -o "%i:%u:%j:%T:%N" 2>/dev/null
       register: running_jobs
       changed_when: false
       failed_when: false
       
     - name: Mostrar jobs encontrados
       debug:
-        msg: "Jobs encontrados: {{ running_jobs.stdout_lines }}"
+        msg: "Jobs encontrados en {{ hostname_short.stdout }}: {{ running_jobs.stdout_lines }}"
         
-    - name: Drainear nodo en modo prueba
-      shell: |
-        echo "MODO PRUEBA: Simulando drain del nodo {{ hostname_full.stdout }}"
-        echo "Comando real: scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason='Prueba de mantenimiento'"
+    - name: Simular drain del nodo (modo prueba)
+      debug:
+        msg: "MODO PRUEBA: Simulando drain del nodo {{ hostname_short.stdout }}"
       when: running_jobs.stdout != ""
-      register: drain_result
       
     - name: Esperar máximo 10 minutos para que terminen los jobs
-      shell: squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T" 2>/dev/null
+      shell: squeue -h -w {{ hostname_short.stdout }} -o "%i:%u:%j:%T:%N" 2>/dev/null
       register: remaining_jobs
       until: remaining_jobs.stdout == ""
-      retries: "{{ (max_wait_minutes / check_interval_minutes) | int }}"
-      delay: "{{ check_interval_minutes * 60 }}"
+      retries: 5  # 5 intentos (10 minutos con delay de 2 minutos)
+      delay: 120  # 120 segundos = 2 minutos
       when: running_jobs.stdout != ""
       
-    - name: Mostrar estado durante la espera
+    - name: Mostrar estado final de la espera
       debug:
-        msg: "Intento {{ remaining_jobs.attempt }}/{{ remaining_jobs.retries }} - Jobs pendientes: {{ remaining_jobs.stdout_lines }}"
+        msg: "Después de {{ max_wait_minutes }} minutos - Jobs pendientes: {{ remaining_jobs.stdout_lines }}"
       when: running_jobs.stdout != ""
       
     - name: Simular requeue de jobs pendientes
-      shell: |
-        echo "MODO PRUEBA: Simulando requeue de jobs"
-        for job_line in $(squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T" 2>/dev/null); do
-          jobid=$(echo $job_line | cut -d: -f1)
-          user=$(echo $job_line | cut -d: -f2)
-          jobname=$(echo $job_line | cut -d: -f3)
-          state=$(echo $job_line | cut -d: -f4)
-          
-          echo "SIMULACIÓN: Requeueando job $jobid ($jobname) de usuario $user (estado: $state)"
-          echo "Comando real: scancel --requeue $jobid"
-        done
-      args:
-        executable: /bin/bash
+      debug:
+        msg: "MODO PRUEBA: Simulando requeue de jobs {{ remaining_jobs.stdout_lines }}"
       when: 
         - running_jobs.stdout != ""
-        - remaining_jobs is defined and remaining_jobs.stdout != ""
-      register: requeue_result
+        - remaining_jobs.stdout != ""
       
     - name: Simular reactivación del nodo
-      shell: |
-        echo "MODO PRUEBA: Simulando reactivación del nodo"
-        echo "Comando real: scontrol update NodeName={{ hostname_full.stdout }} State=RESUME"
+      debug:
+        msg: "MODO PRUEBA: Simulando reactivación del nodo {{ hostname_short.stdout }}"
       when: running_jobs.stdout != ""
-      register: resume_result
       
-    - name: Resultado de la prueba
+    - name: Simular limpieza de /tmp (solo muestra)
+      shell: |
+        echo "MODO PRUEBA: Simulando limpieza de /tmp"
+        find /tmp -type f -mtime +1 -name "*.tmp" 2>/dev/null | head -5 || true
+      register: tmp_cleanup_simulation
+      changed_when: false
+      
+    - name: Mostrar archivos que se eliminarían
+      debug:
+        msg: "Archivos antiguos encontrados: {{ tmp_cleanup_simulation.stdout_lines }}"
+        
+    - name: Resultado final de la prueba
       debug:
         msg:
-          - "PRUEBA COMPLETADA en {{ hostname_full.stdout }}"
+          - "PRUEBA COMPLETADA en {{ hostname_short.stdout }}"
           - "Jobs encontrados inicialmente: {{ running_jobs.stdout_lines | length }}"
           - "Jobs pendientes al final: {{ remaining_jobs.stdout_lines | default([]) | length }}"
-          - "Tiempo máximo de espera: {{ max_wait_minutes }} minutos"
+          - "Tiempo de espera: {{ max_wait_minutes }} minutos"
           - "MODO PRUEBA: No se ejecutaron comandos reales de SLURM"
