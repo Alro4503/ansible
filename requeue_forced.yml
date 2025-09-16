@@ -1,0 +1,52 @@
+- name: PRUEBA SIMPLIFICADA - Requeue forzado
+  hosts: all
+  become: yes
+  gather_facts: no
+  
+  tasks:
+    - name: Obtener hostname
+      command: hostname -f
+      register: hostname_full
+      changed_when: false
+      
+    - name: Obtener jobs en el nodo
+      shell: squeue -h -w {{ hostname_full.stdout }} -o "%i" 2>/dev/null
+      register: job_list
+      changed_when: false
+      failed_when: false
+      
+    - name: Mostrar jobs encontrados
+      debug:
+        msg: "Jobs en nodo: {{ job_list.stdout_lines }}"
+        
+    - name: Salir si no hay jobs
+      meta: end_play
+      when: job_list.stdout == ""
+      
+    - name: Drainear nodo
+      shell: |
+        scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Requeue testing"
+      failed_when: false
+      
+    - name: Forzar requeue de TODOS los jobs
+      shell: |
+        # Cancelar todos los jobs con requeue forzado
+        for jobid in $(squeue -h -w {{ hostname_full.stdout }} -o "%i" 2>/dev/null); do
+          echo "Forzando requeue del job $jobid"
+          scancel --requeue --signal=KILL $jobid
+        done
+      args:
+        executable: /bin/bash
+      failed_when: false
+      
+    - name: Esperar 60 segundos
+      pause:
+        seconds: 60
+      
+    - name: Reactivar nodo
+      shell: |
+        scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
+      
+    - name: Resultado final
+      debug:
+        msg: "Requeue forzado completado para {{ job_list.stdout_lines | length }} jobs"
