@@ -4,7 +4,7 @@
   gather_facts: no
   vars:
     ansible_become_exe: "sudo -n"
-    max_wait_minutes: 2  # Reducido para pruebas
+    max_wait_minutes: 2
     check_interval_seconds: 15
     
   tasks:
@@ -50,7 +50,6 @@
           
           if [ "$state" = "RUNNING" ]; then
             echo "CANCELANDO job RUNNING $jobid para requeue..."
-            # Forzar cancelación con requeue
             scancel --requeue --signal=KILL $jobid
           else
             echo "Requeueando job $jobid (estado: $state)..."
@@ -72,7 +71,7 @@
         {% for job_line in running_jobs.stdout_lines %}
           jobid="{{ job_line.split(':')[0] }}"
           echo "Job {{ jobid }}:"
-          squeue -j $jobid -o "%i:%j:%N:%T:%P" 2>/dev/null || echo "  NO_ENCOUNTRADO"
+          squeue -j $jobid -o "%i:%j:%N:%T:%P" 2>/dev/null || echo "  NO_ENCONTRADO"
         {% endfor %}
       register: final_job_status
       
