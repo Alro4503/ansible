@@ -6,7 +6,6 @@
     - name: Ejecutar nextflow self-update
       command: nextflow self-update
       args:
-        warn: no  
 
     - name: Aplicar permisos 777 al binario de nextflow
       file:
