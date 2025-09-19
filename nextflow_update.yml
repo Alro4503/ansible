@@ -1,11 +1,11 @@
 ---
-- name: Actualizar Nextflow en todos los nodos
+- name: Actualizar Nextflow en nodos donde existe
   hosts: all
   become: yes
   tasks:
     - name: Ejecutar nextflow self-update
       command: nextflow self-update
-      args:
+      ignore_errors: yes
 
     - name: Aplicar permisos 777 al binario de nextflow
       file:
