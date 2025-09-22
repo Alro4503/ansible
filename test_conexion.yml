@@ -1,0 +1,8 @@
+---
+- name: Test conexión básico
+  hosts: all
+  gather_facts: no
+  
+  tasks:
+    - name: Probar ping
+      ansible.builtin.ping:
