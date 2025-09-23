@@ -1,0 +1,23 @@
+# playbooks/test-sudo-manual.yml
+---
+- name: Test sudo sin contraseña (configuración manual)
+  hosts: all
+  become: yes  # ← Ahora sin contraseña
+  
+  tasks:
+    - name: Probar sudo
+      command: whoami
+      register: sudo_result
+      changed_when: false
+      
+    - name: Verificar acceso privilegiado
+      command: cat /etc/sudoers | grep NOPASSWD
+      register: sudoers_check
+      changed_when: false
+      
+    - name: Mostrar resultados
+      debug:
+        msg: |
+          {{ inventory_hostname }}:
+          ✅ Usuario con sudo: {{ sudo_result.stdout }}
+          ✅ Configuración: {{ sudoers_check.stdout }}
