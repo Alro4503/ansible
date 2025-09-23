@@ -1,0 +1,36 @@
+---
+- name: Test completo de conectividad y privilegios
+  hosts: all
+  gather_facts: no
+  
+  tasks:
+    - name: Probar conexión básica
+      ansible.builtin.ping:
+
+    - name: Intentar comando sin sudo
+      command: whoami
+      register: user_result
+      changed_when: false
+      
+    - name: Mostrar usuario sin privilegios
+      debug:
+        msg: "Usuario normal: {{ user_result.stdout }}"
+
+    - name: Intentar comando con sudo
+      become: yes
+      command: whoami
+      register: sudo_result
+      changed_when: false
+      ignore_errors: yes
+      
+    - name: Mostrar resultado del sudo
+      debug:
+        msg: 
+          - "Sudo exitoso - Usuario root: {{ sudo_result.stdout }}"
+          - "¡Los privilegios de sudo funcionan correctamente!"
+      when: sudo_result is succeeded
+      
+    - name: Advertencia si falla el sudo
+      debug:
+        msg: "⚠️  El sudo NO funciona - Error: {{ sudo_result.msg }}"
+      when: sudo_result is failed
