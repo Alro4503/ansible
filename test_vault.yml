@@ -10,11 +10,38 @@
         file: vault.yml
         name: bioinf_credentials
 
+    - name: Debug - Ver variables cargadas
+      debug:
+        var: bioinf_credentials
+      when: false  # Cambia a true si quieres ver el contenido
+
+    - name: Obtener solo la IP del host
+      set_fact:
+        host_ip: "{{ inventory_hostname.split(' - ')[1] }}"
+
     - name: Cargar credenciales específicas para cada host
       set_fact:
-        ansible_user: "{{ bioinf_credentials[inventory_hostname].user }}"
-        ansible_ssh_pass: "{{ bioinf_credentials[inventory_hostname].password }}"
-        ansible_become_pass: "{{ bioinf_credentials[inventory_hostname].password }}"
+        ansible_user: "{{ bioinf_credentials[host_ip].user }}"
+        ansible_ssh_pass: "{{ bioinf_credentials[host_ip].password }}"
+        ansible_become_pass: "{{ bioinf_credentials[host_ip].password }}"
 
     - name: Probar conexión básica
       ansible.builtin.ping:
+
+    - name: Comprobar sudo
+      become: yes
+      command: whoami
+      register: sudo_check
+      changed_when: false
+      ignore_errors: yes
+      
+    - name: Mostrar resultados
+      debug:
+        msg: |
+          {{ inventory_hostname }}:
+          ✅ Conexión SSH: OK
+          {% if sudo_check is succeeded %}
+          ✅ Sudo: OK (usuario: {{ sudo_check.stdout }})
+          {% else %}
+          ❌ Sudo: FALLIDO
+          {% endif %}
