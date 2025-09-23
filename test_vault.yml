@@ -8,24 +8,39 @@
     - name: Cargar vault manualmente
       include_vars:
         file: vault.yml
-        name: bioinf_credentials
+        name: loaded_vars
 
-    - name: Debug 1 - Mostrar todo el contenido del vault
-      debug:
-        var: bioinf_credentials
-      run_once: true
+    - name: Acceder a la variable correcta
+      set_fact:
+        bioinf_credentials: "{{ loaded_vars.bioinf_credentials }}"
 
-    - name: Debug 2 - Mostrar IP del host actual
-      debug:
-        var: inventory_hostname
-      run_once: true
+    - name: Extraer solo la IP del nombre del host
+      set_fact:
+        host_ip: "{{ inventory_hostname.split(' - ')[1] }}"
 
-    - name: Debug 3 - Verificar si existe la clave para este host
-      debug:
-        msg: "¿Existe la clave '{{ inventory_hostname.split(' - ')[1] }}'? {{ inventory_hostname.split(' - ')[1] in bioinf_credentials }}"
-      run_once: true
+    - name: Cargar credenciales específicas para cada host
+      set_fact:
+        ansible_user: "{{ bioinf_credentials[host_ip].user }}"
+        ansible_ssh_pass: "{{ bioinf_credentials[host_ip].password }}"
+        ansible_become_pass: "{{ bioinf_credentials[host_ip].password }}"
 
-    - name: Debug 4 - Mostrar todas las claves disponibles
+    - name: Probar conexión básica
+      ansible.builtin.ping:
+
+    - name: Comprobar sudo
+      become: yes
+      command: whoami
+      register: sudo_check
+      changed_when: false
+      ignore_errors: yes
+      
+    - name: Mostrar resultados
       debug:
-        msg: "Claves en vault: {{ bioinf_credentials.keys() | list }}"
-      run_once: true
+        msg: |
+          {{ inventory_hostname }}:
+          ✅ Conexión SSH: OK
+          {% if sudo_check is succeeded %}
+          ✅ Sudo: OK (usuario: {{ sudo_check.stdout }})
+          {% else %}
+          ❌ Sudo: FALLIDO
+          {% endif %}
