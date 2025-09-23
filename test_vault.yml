@@ -1,10 +1,15 @@
-# playbooks/test-conexion-vault.yml
+# test_vault.yml
 ---
-- name: Test conexión completa con vault
+- name: Test conexión con vault
   hosts: all
   gather_facts: no
   
   tasks:
+    - name: Cargar vault manualmente
+      include_vars:
+        file: vault.yml
+        name: bioinf_credentials
+
     - name: Cargar credenciales específicas para cada host
       set_fact:
         ansible_user: "{{ bioinf_credentials[inventory_hostname].user }}"
@@ -13,21 +18,3 @@
 
     - name: Probar conexión básica
       ansible.builtin.ping:
-
-    - name: Comprobar sudo
-      become: yes
-      command: whoami
-      register: sudo_check
-      changed_when: false
-      ignore_errors: yes
-      
-    - name: Mostrar resultados completos
-      debug:
-        msg: |
-          {{ inventory_hostname }}:
-          ✅ Conexión SSH: OK
-          {% if sudo_check is succeeded %}
-          ✅ Sudo: OK (usuario: {{ sudo_check.stdout }})
-          {% else %}
-          ❌ Sudo: FALLIDO - {{ sudo_check.msg }}
-          {% endif %}
