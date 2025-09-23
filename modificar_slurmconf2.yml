@@ -1,0 +1,28 @@
+---
+- name: Arreglar definitivamente la partición interactive en slurm.conf
+  hosts: all
+  become: yes
+  vars:
+    linea_correcta: "# PartitionName=interactive Nodes=bioinf3.vhio.org,bioinf4.vhio.org,bioinf5.vhio.org,bioinf6.vhio.org MaxTime=INFINITE State=UP PriorityTier=50"
+
+  tasks:
+    - name: Eliminar todas las versiones existentes (activas o comentadas)
+      lineinfile:
+        path: /etc/slurm/slurm.conf
+        state: absent
+        regexp: "^#?.*PartitionName=interactive.*"
+
+    - name: Añadir línea correcta al final del archivo
+      lineinfile:
+        path: /etc/slurm/slurm.conf
+        line: "{{ linea_correcta }}"
+        insertafter: EOF
+
+    - name: Verificar resultado
+      shell: grep -A2 "PartitionName=interactive" /etc/slurm/slurm.conf
+      register: resultado
+      changed_when: false
+
+    - name: Mostrar resultado
+      debug:
+        msg: "Configuración actual: {{ resultado.stdout }}"

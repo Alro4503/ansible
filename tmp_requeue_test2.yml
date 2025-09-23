@@ -1,0 +1,98 @@
+- name: PRUEBA REAL - Requeue automático
+  hosts: all
+  become: yes
+  gather_facts: no
+  vars:
+    ansible_become_exe: "sudo -n"
+    max_wait_minutes: 5  # 5 minutos máximo
+    check_interval_seconds: 30  # Verificación cada 30 segundos
+    
+  tasks:
+    - name: Obtener hostname completo
+      command: hostname -f
+      register: hostname_full
+      changed_when: false
+      
+    - name: Verificar jobs corriendo en SLURM
+      shell: squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T:%N" 2>/dev/null
+      register: running_jobs
+      changed_when: false
+      failed_when: false
+      
+    - name: Mostrar jobs encontrados
+      debug:
+        msg: "Jobs encontrados en {{ hostname_full.stdout }}: {{ running_jobs.stdout_lines }}"
+        
+    - name: Salir si no hay jobs
+      meta: end_play
+      when: running_jobs.stdout == ""
+      
+    - name: Drainear nodo (REAL)
+      shell: |
+        scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Prueba de requeue - timeout {{ max_wait_minutes }}min"
+      register: drain_result
+      failed_when: false
+      
+    - name: Configurar intentos de espera
+      set_fact:
+        max_attempts: "{{ (max_wait_minutes * 60 / check_interval_seconds) | int }}"
+      
+    - name: Esperar máximo {{ max_wait_minutes }} minutos
+      shell: squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T:%N" 2>/dev/null
+      register: current_jobs
+      until: current_jobs.stdout == ""
+      retries: "{{ max_attempts }}"
+      delay: "{{ check_interval_seconds }}"
+      ignore_errors: yes
+      
+    - name: Mostrar estado final de la espera
+      debug:
+        msg: "Jobs todavía corriendo después de la espera: {{ current_jobs.stdout_lines }}"
+      when: current_jobs.stdout != ""
+      
+    - name: Forzar requeue de jobs pendientes (REAL)
+      shell: |
+        for job_line in $(squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T:%N" 2>/dev/null); do
+          jobid=$(echo $job_line | cut -d: -f1)
+          user=$(echo $job_line | cut -d: -f2)
+          jobname=$(echo $job_line | cut -d: -f3)
+          echo "REQUEUE REAL: Job $jobid ($jobname) de usuario $user"
+          scancel --requeue $jobid
+        done
+      args:
+        executable: /bin/bash
+      when: current_jobs.stdout != ""
+      register: requeue_result
+      failed_when: false
+      
+    - name: Esperar 1 minuto para que SLURM procese el requeue
+      pause:
+        minutes: 1
+      when: requeue_result is defined
+      
+    - name: Verificar dónde está el job ahora
+      shell: |
+        # Buscar el job original
+        original_job_id="{{ running_jobs.stdout_lines[0].split(':')[0] }}"
+        squeue -j $original_job_id -o "%i:%j:%N:%T" 2>/dev/null || echo "Job_no_encontrado"
+      register: job_after_requeue
+      failed_when: false
+      
+    - name: Mostrar estado final del job
+      debug:
+        msg: "Estado del job después del requeue: {{ job_after_requeue.stdout }}"
+        
+    - name: Reactivar nodo (REAL)
+      shell: |
+        scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
+      register: resume_result
+      failed_when: false
+      
+    - name: Resultado final de la prueba
+      debug:
+        msg:
+          - "PRUEBA COMPLETADA en {{ hostname_full.stdout }}"
+          - "Jobs iniciales: {{ running_jobs.stdout_lines }}"
+          - "Jobs requeueados: {{ requeue_result.stdout if requeue_result is defined else 'Ninguno' }}"
+          - "Nuevo estado del job: {{ job_after_requeue.stdout }}"
+          - "Nodo reactivado: {{ 'Sí' if resume_result.rc == 0 else 'No' }}"

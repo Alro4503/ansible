@@ -1,0 +1,14 @@
+---
+- name: Actualizar Nextflow en nodos donde existe
+  hosts: all
+  become: yes
+  tasks:
+    - name: Ejecutar nextflow self-update
+      command: nextflow self-update
+      ignore_errors: yes
+
+    - name: Aplicar permisos 777 al binario de nextflow
+      file:
+        path: /usr/local/bin/nextflow
+        mode: '0777'
+        state: file

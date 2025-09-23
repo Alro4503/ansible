@@ -1,0 +1,71 @@
+---
+- name: "Modificación segura de slurm.conf con reinicio controlado"
+  hosts: all
+  become: yes
+  vars:
+    partition_name: "interactive"
+    config_completa:
+      Nodes: "bioinf3.vhio.org,bioinf4.vhio.org,bioinf5.vhio.org,bioinf8.vhio.org"
+      MaxTime: "INFINITE"
+      State: "UP"
+      PriorityTier: "100"
+      AllowGroups: ""
+      AllowAccounts: ""
+
+  tasks:
+    # === FASE 1 - MODIFICACIÓN DE CONFIGURACIÓN ===
+    - name: Verificar slurm.conf
+      stat:
+        path: /etc/slurm/slurm.conf
+      register: slurm_conf
+
+    - name: Obtener configuración actual
+      shell: |
+        grep -P "^(#?\s*PartitionName={{ partition_name }}\b)" /etc/slurm/slurm.conf || echo "no_encontrado"
+      register: linea_actual
+      changed_when: false
+      when: slurm_conf.stat.exists
+
+    - name: Construir nueva configuración
+      set_fact:
+        nueva_linea: >-
+          {% set is_commented = linea_actual.stdout is match('^#') %}{% if is_commented %}# {% endif %}PartitionName={{ partition_name }}
+          {% for param, value in config_completa.items() %}{% if value %}{{ param }}={{ value }} {% endif %}{% endfor %}
+      when: 
+        - slurm_conf.stat.exists
+        - "'no_encontrado' not in linea_actual.stdout"
+
+    - name: Aplicar cambios
+      replace:
+        path: /etc/slurm/slurm.conf
+        regexp: "^{{ linea_actual.stdout | regex_escape() }}$"
+        replace: "{{ nueva_linea | trim }}"
+      when: 
+        - slurm_conf.stat.exists
+        - nueva_linea is defined
+      register: cambio_realizado
+      notify: Reiniciar servicios SLURM
+
+    # === FASE 2 - VERIFICACIÓN ===
+    - name: Mostrar resumen
+      debug:
+        msg: |-
+          [{{ inventory_hostname }}] 
+          Estado: {% if cambio_realizado.changed %}MODIFICADO{% else %}OK (sin cambios){% endif %}
+          Config: {{ nueva_linea | trim | default('No modificado') }}
+
+  handlers:
+    - name: Reiniciar servicios SLURM
+      block:
+        - name: Reiniciar slurmctld (solo en master)
+          command: systemctl restart slurmctld
+          when: "'mdrvpremst01' in inventory_hostname or 'mdrvpremst01.' in inventory_hostname"
+
+        - name: Reiniciar slurmd (solo en workers)
+          command: systemctl restart slurmd
+          when: >
+            not (
+              'mdrvpremst01' in inventory_hostname or
+              'mdrvpremst01.' in inventory_hostname
+            )
+      listen: Reiniciar servicios SLURM

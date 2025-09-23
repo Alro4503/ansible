@@ -1,0 +1,23 @@
+---
+- name: Ejecutar script de limpieza /tmp
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Copiar script al nodo (si no está ya)
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/limpieza_tmp.sh" 
+        dest: /usr/local/bin/limpieza_tmp.sh
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Ejecutar script de limpieza
+      ansible.builtin.command: /usr/local/bin/limpieza_tmp.sh
+      register: script_output
+      changed_when: script_output.rc == 0
+
+    - name: Mostrar salida del script
+      ansible.builtin.debug:
+        var: script_output.stdout_lines

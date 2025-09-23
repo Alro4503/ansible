@@ -1,0 +1,67 @@
+---
+- name: Modificación completa de particiones en slurm.conf
+  hosts: all
+  become: yes
+  vars:
+    partition_name: "interactive"  # Nombre de la partición a modificar
+    config_completa:  # Todos los parámetros configurables
+      Nodes: "bioinf3.vhio.org,bioinf4.vhio.org,bioinf5.vhio.org,bioinf8.vhio.org"
+      MaxTime: "INFINITE"
+      State: "UP"
+      PriorityTier: "100"
+      # Default: "NO"
+      AllowGroups: ""
+      AllowAccounts: ""
+
+  tasks:
+    - name: Verificar archivo de configuración
+      stat:
+        path: /etc/slurm/slurm.conf
+      register: slurm_conf
+
+    - name: Obtener línea actual completa
+      shell: |
+        grep -P "^(#?\s*PartitionName={{ partition_name }}\b)" /etc/slurm/slurm.conf || echo "no_encontrado"
+      register: linea_actual
+      changed_when: false
+      when: slurm_conf.stat.exists
+
+    - name: Construir nueva línea con todos los parámetros
+      set_fact:
+        nueva_linea: >-
+          {% set is_commented = linea_actual.stdout is match('^#') %}{% if is_commented %}# {% endif %}PartitionName={{ partition_name }}
+          {% for param, value in config_completa.items() %}{% if value %}{{ param }}={{ value }} {% endif %}{% endfor %}
+      when: 
+        - slurm_conf.stat.exists
+        - "'no_encontrado' not in linea_actual.stdout"
+
+    - name: Reemplazar línea existente
+      replace:
+        path: /etc/slurm/slurm.conf
+        regexp: "^{{ linea_actual.stdout | regex_escape() }}$"
+        replace: "{{ nueva_linea | trim }}"
+      when: 
+        - slurm_conf.stat.exists
+        - nueva_linea is defined
+      register: cambio_realizado
+
+    - name: Mostrar resumen detallado
+      debug:
+        msg: |-
+          === RESULTADO EN {{ inventory_hostname }} ===
+          {% if 'no_encontrado' in linea_actual.stdout %}
+          ❌ ERROR: Partición '{{ partition_name }}' no encontrada
+          {% elif cambio_realizado.changed %}
+          ✅ ÉXITO: Línea actualizada:
+          {{ nueva_linea | trim }}
+          ---
+          Cambios realizados:
+          {% for param, value in config_completa.items() %}
+          - {{ param }}: {{ value }}{% endfor %}
+          {% else %}
+          ℹ️ INFO: La configuración ya estaba actualizada
+          {% endif %}
+          
+          🔍 Verificación:
+          grep -A5 "PartitionName={{ partition_name }}" /etc/slurm/slurm.conf
+      when: slurm_conf.stat.exists

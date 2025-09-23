@@ -1,0 +1,55 @@
+---
+- name: Actualización directa de nodos en slurm.conf (versión corregida)
+  hosts: all
+  become: yes
+  vars:
+    partition_name: "interactive"
+    nuevos_nodos: ["bioinf3.vhio.org", "bioinf4.vhio.org", "bioinf5.vhio.org", "bioinf8.vhio.org"]
+    params_fijos: "MaxTime=INFINITE State=UP PriorityTier=50"
+
+  tasks:
+    - name: Verificar archivo de configuración
+      stat:
+        path: /etc/slurm/slurm.conf
+      register: slurm_conf
+
+    - name: Obtener línea actual (para mantener otros parámetros)
+      shell: |
+        grep -P "^(#?\s*PartitionName={{ partition_name }}\s+Nodes=)[^ ]+" /etc/slurm/slurm.conf || echo "no_encontrado"
+      register: linea_actual
+      changed_when: false
+      when: slurm_conf.stat.exists
+
+    - name: Construir nueva línea manteniendo formato
+      set_fact:
+        nueva_linea: "{{ (linea_actual.stdout is match('^#')) | ternary('# ','') }}PartitionName={{ partition_name }} Nodes={{ nuevos_nodos | join(',') }} {{ params_fijos }}"
+      when: 
+        - slurm_conf.stat.exists
+        - "'no_encontrado' not in linea_actual.stdout"
+
+    - name: Reemplazar línea existente
+      replace:
+        path: /etc/slurm/slurm.conf
+        regexp: "^{{ linea_actual.stdout | regex_escape() }}$"
+        replace: "{{ nueva_linea }}"
+      when: 
+        - slurm_conf.stat.exists
+        - nueva_linea is defined
+      register: cambio_realizado
+
+    - name: Mostrar resumen ejecutivo
+      debug:
+        msg: |-
+          === RESULTADO EN {{ inventory_hostname }} ===
+          {% if 'no_encontrado' in linea_actual.stdout %}
+          AVISO: Partición '{{ partition_name }}' no encontrada
+          {% elif cambio_realizado.changed %}
+          ÉXITO: Línea actualizada:
+          {{ nueva_linea }}
+          {% else %}
+          INFO: La configuración ya estaba actualizada
+          {% endif %}
+          
+          Verificación manual:
+          grep -A2 "PartitionName={{ partition_name }}" /etc/slurm/slurm.conf
+      when: slurm_conf.stat.exists

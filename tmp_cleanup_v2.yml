@@ -1,9 +1,11 @@
 ---
 - name: Limpieza automática de /tmp usando Ansible nativo
-  hosts: compute_nodes
+  hosts: all
   become: yes
   
   vars:
+    ansible_become_exe: "sudo -n"
+    ansible_become_flags: ""
     mtime_days: 1
     systemd_paths:
       - "/tmp/systemd-*"

@@ -1,0 +1,87 @@
+- name: Requeue automático CON CAMBIO DE NODO
+  hosts: all
+  become: yes
+  vars:
+    ansible_become_exe: "sudo -n"
+    max_wait_minutes: 3
+    check_interval_seconds: 20
+    
+  tasks:
+    - name: Obtener hostname completo
+      command: hostname -f
+      register: hostname_full
+      changed_when: false
+      
+    - name: Encontrar nodo alternativo
+      shell: |
+        sinfo -p short -h -o "%N" | tr ',' '\n' | grep -v {{ hostname_full.stdout }} | grep -v down | head -1
+      register: alternative_node
+      failed_when: false
+      
+    - name: Verificar jobs corriendo
+      shell: squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T:%N:%P" 2>/dev/null
+      register: running_jobs
+      changed_when: false
+      failed_when: false
+      
+    - name: Mostrar jobs encontrados
+      debug:
+        msg: "Jobs en {{ hostname_full.stdout }}: {{ running_jobs.stdout_lines }}"
+        
+    - name: Salir si no hay jobs
+      meta: end_play
+      when: running_jobs.stdout == ""
+      
+    - name: Drainear nodo
+      shell: |
+        scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Auto-requeue to {{ alternative_node.stdout }}"
+      register: drain_result
+      failed_when: false
+      
+    - name: Esperar 15 segundos
+      pause:
+        seconds: 15
+      
+    - name: Requeuear jobs con cambio de nodo forzado
+      shell: |
+        for job_line in $(squeue -h -w {{ hostname_full.stdout }} -o "%i:%j:%B" 2>/dev/null); do
+          jobid=$(echo $job_line | cut -d: -f1)
+          jobname=$(echo $job_line | cut -d: -f2)
+          script_path=$(scontrol show job $jobid | grep "Command=" | cut -d= -f2)
+          
+          echo "Procesando job $jobid ($jobname)"
+          
+          # Opción 1: Si hay nodo alternativo, forzar cambio
+          {% if alternative_node.stdout != "" %}
+            echo "Moviendo job $jobid a {{ alternative_node.stdout }}"
+            scancel $jobid
+            sleep 2
+            sbatch --nodelist={{ alternative_node.stdout }} $script_path
+          {% else %}
+            # Opción 2: Si no hay alternativo, requeue normal
+            echo "Requeue normal del job $jobid"
+            scontrol requeue $jobid
+          {% endif %}
+        done
+      args:
+        executable: /bin/bash
+      register: requeue_result
+      failed_when: false
+      
+    - name: Esperar 30 segundos
+      pause:
+        seconds: 30
+      
+    - name: Reactivar nodo
+      shell: |
+        scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
+      register: resume_result
+      failed_when: false
+      
+    - name: Resultado final
+      debug:
+        msg:
+          - "✅ REQUEUE COMPLETADO en {{ hostname_full.stdout }}"
+          - "Jobs movidos: {{ running_jobs.stdout_lines | length }}"
+          - "Nodo destino: {{ alternative_node.stdout }}"
+          - "Resultado: {{ requeue_result.stdout }}"

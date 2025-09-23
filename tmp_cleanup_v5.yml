@@ -1,0 +1,166 @@
+---
+- name: Limpieza automática de /tmp usando Ansible nativo
+  hosts: all
+  become: yes
+  gather_facts: no  # Desactivado para eliminar warnings
+  vars:
+    ansible_become_exe: "sudo -n"
+    ansible_become_flags: ""
+    mtime_days: 1
+    systemd_paths:
+      - "/tmp/systemd-*"
+      - "/tmp/.font-unix*"
+      - "/tmp/.ICE-unix*" 
+      - "/tmp/.Test-unix*"
+      - "/tmp/.X11-unix*"
+      - "/tmp/.XIM-unix*"
+      - "/tmp/snap-private-tmp*"
+    
+  tasks:
+    - name: Verificar si /tmp tiene loop device
+      shell: mount | grep 'loop.*on /tmp'
+      register: loop_check
+      failed_when: false
+      changed_when: false
+      
+    - name: Saltar si hay loop device
+      meta: end_host
+      when: loop_check.rc == 0
+      
+    - name: Obtener hostname completo
+      command: hostname -f
+      register: hostname_full
+      changed_when: false
+      
+    - name: Verificar jobs corriendo en SLURM
+      shell: squeue -h -w {{ hostname_full.stdout }} 2>/dev/null | wc -l
+      register: running_jobs
+      changed_when: false
+      failed_when: false
+      
+    - name: Mostrar jobs corriendo
+      shell: squeue -w {{ hostname_full.stdout }}
+      when: running_jobs.stdout|int > 0
+      register: job_list
+      
+    - name: Drainear nodo si hay jobs
+      shell: |
+        scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Limpieza /tmp automática" || true
+      when: running_jobs.stdout|int > 0
+      register: drain_result
+      failed_when: false
+      
+    - name: Esperar a que terminen los jobs
+      shell: squeue -h -w {{ hostname_full.stdout }} 2>/dev/null | wc -l
+      register: jobs_check
+      until: jobs_check.stdout|int == 0
+      retries: 1440  # 12 horas máximo (1440 * 30s)
+      delay: 30
+      when: running_jobs.stdout|int > 0
+      
+    - name: Buscar archivos antiguos para eliminar (sin .time)
+      shell: |
+        find /tmp -type f -mtime +{{ mtime_days }} \
+        ! -name "*.time" \
+        ! -name "aquota.user" \
+        ! -name "aquota.group" \
+        ! -name "krb5cc*" \
+        ! -path "/tmp/systemd-*" \
+        ! -path "/tmp/.font-unix*" \
+        ! -path "/tmp/.ICE-unix*" \
+        ! -path "/tmp/.Test-unix*" \
+        ! -path "/tmp/.X11-unix*" \
+        ! -path "/tmp/.XIM-unix*" \
+        ! -path "/tmp/snap-private-tmp*" | wc -l
+      register: old_files_count
+      become: yes
+      
+    - name: Eliminar archivos antiguos directamente
+      shell: |
+        find /tmp -type f -mtime +{{ mtime_days }} \
+        ! -name "*.time" \
+        ! -name "aquota.user" \
+        ! -name "aquota.group" \
+        ! -name "krb5cc*" \
+        ! -path "/tmp/systemd-*" \
+        ! -path "/tmp/.font-unix*" \
+        ! -path "/tmp/.ICE-unix*" \
+        ! -path "/tmp/.Test-unix*" \
+        ! -path "/tmp/.X11-unix*" \
+        ! -path "/tmp/.XIM-unix*" \
+        ! -path "/tmp/snap-private-tmp*" \
+        -delete 2>/dev/null || true
+      register: delete_files_result
+      become: yes
+      when: old_files_count.stdout|int > 0
+      failed_when: false  # No fallar por errores de permisos
+      
+    - name: Buscar directorios antiguos para eliminar
+      shell: |
+        find /tmp -type d -mtime +{{ mtime_days }} \
+        ! -path "/tmp/systemd-*" \
+        ! -path "/tmp/.font-unix*" \
+        ! -path "/tmp/.ICE-unix*" \
+        ! -path "/tmp/.Test-unix*" \
+        ! -path "/tmp/.X11-unix*" \
+        ! -path "/tmp/.XIM-unix*" \
+        ! -path "/tmp/snap-private-tmp*" \
+        ! -path "/tmp" | wc -l
+      register: old_dirs_count
+      become: yes
+      
+    - name: Eliminar directorios antiguos
+      shell: |
+        find /tmp -type d -mtime +{{ mtime_days }} \
+        ! -path "/tmp/systemd-*" \
+        ! -path "/tmp/.font-unix*" \
+        ! -path "/tmp/.ICE-unix*" \
+        ! -path "/tmp/.Test-unix*" \
+        ! -path "/tmp/.X11-unix*" \
+        ! -path "/tmp/.XIM-unix*" \
+        ! -path "/tmp/snap-private-tmp*" \
+        ! -path "/tmp" \
+        -exec rmdir {} + 2>/dev/null || true
+      register: delete_dirs_result
+      become: yes
+      when: old_dirs_count.stdout|int > 0
+      failed_when: false
+      
+    - name: Verificar estado actual del nodo
+      shell: scontrol show node {{ hostname_full.stdout }} | grep State
+      register: node_state
+      when: 
+        - running_jobs.stdout|int > 0
+        - drain_result is defined
+      changed_when: false
+      
+    - name: Reactivar nodo solo si estaba en DRAIN
+      shell: |
+        if scontrol show node {{ hostname_full.stdout }} | grep -q "State=DRAIN"; then
+          scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
+        else
+          echo "Nodo no requiere reactivación"
+        fi
+      args:
+        executable: /bin/bash
+      when: 
+        - running_jobs.stdout|int > 0
+        - drain_result is defined
+      register: resume_result
+      failed_when: false
+      changed_when: resume_result.rc == 0
+      
+    - name: Mostrar uso final de /tmp
+      shell: df -h /tmp
+      register: final_usage
+      changed_when: false
+      
+    - name: Resultado final
+      debug:
+        msg: 
+          - "Limpieza completada en {{ hostname_full.stdout }}"
+          - "Jobs iniciales: {{ running_jobs.stdout }}"
+          - "Archivos eliminados: {{ old_files_count.stdout }}"
+          - "Directorios eliminados: {{ old_dirs_count.stdout }}"
+          - "Estado del nodo: {{ node_state.stdout | default('OK') }}"
+          - "Uso final: {{ final_usage.stdout_lines[-1] }}"
