@@ -1,8 +1,7 @@
-# playbooks/test-sudo-manual.yml
 ---
 - name: Test sudo sin contraseña (configuración manual)
   hosts: all
-  become: yes  # ← Ahora sin contraseña
+  become: yes
   
   tasks:
     - name: Probar sudo
@@ -10,14 +9,16 @@
       register: sudo_result
       changed_when: false
       
-    - name: Verificar acceso privilegiado
-      command: cat /etc/sudoers | grep NOPASSWD
+    - name: Verificar configuración NOPASSWD
+      command: grep NOPASSWD /etc/sudoers
       register: sudoers_check
       changed_when: false
+      ignore_errors: yes
       
     - name: Mostrar resultados
       debug:
         msg: |
           {{ inventory_hostname }}:
           ✅ Usuario con sudo: {{ sudo_result.stdout }}
-          ✅ Configuración: {{ sudoers_check.stdout }}
+          ✅ Configuración NOPASSWD: {{ sudoers_check.stdout | default('No encontrada') }}
+          ✅ Estado del comando: {{ 'Éxito' if not sudoers_check.failed else 'Falló - verificar configuración' }}
