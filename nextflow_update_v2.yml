@@ -1,1 +1,57 @@
+---
+- name: Actualizar Nextflow en nodos donde existe
+  hosts: all
+  gather_facts: no 
+  
+  tasks:
+    # 1. CARGAR CREDENCIALES DESDE VAULT 
+    - name: Cargar vault manualmente
+      include_vars:
+        file: vault.yml
+        name: loaded_vars
 
+    - name: Acceder a las credenciales
+      set_fact:
+        bioinf_credentials: "{{ loaded_vars.bioinf_credentials }}"
+
+    - name: Extraer IP para buscar en vault
+      set_fact:
+        host_ip: "{{ inventory_hostname.split(' - ')[1] }}"
+
+    - name: Configurar credenciales para este host
+      set_fact:
+        ansible_user: "{{ bioinf_credentials[host_ip].user }}"
+        ansible_ssh_pass: "{{ bioinf_credentials[host_ip].password }}"
+        ansible_become_pass: "{{ bioinf_credentials[host_ip].password }}"
+
+    # 2. VERIFICAR SI NEXTFLOW EXISTE ANTES DE ACTUALIZAR
+    - name: Comprobar si nextflow está instalado
+      stat:
+        path: /usr/local/bin/nextflow
+      register: nextflow_exists
+      become: yes
+
+    # 3. ACTUALIZAR NEXTFLOW (solo si existe)
+    - name: Ejecutar nextflow self-update
+      command: nextflow self-update
+      ignore_errors: yes
+      become: yes
+      when: nextflow_exists.stat.exists
+
+    # 4. APLICAR PERMISOS 777 (SE EJECUTA SIEMPRE)
+    - name: Aplicar permisos 777 al binario de nextflow
+      file:
+        path: /usr/local/bin/nextflow
+        mode: '0777'
+        state: file
+      become: yes
+      when: nextflow_exists.stat.exists
+
+    # 5. MOSTRAR RESULTADOS
+    - name: Mostrar resumen de ejecución
+      debug:
+        msg: |
+          {{ inventory_hostname }}:
+          📦 Nextflow instalado: {{ 'SÍ' if nextflow_exists.stat.exists else 'NO' }}
+          🔄 Actualización: {{ 'Intentada' if nextflow_exists.stat.exists else 'Saltada' }}
+          🔒 Permisos: {{ 'Aplicados' if nextflow_exists.stat.exists else 'No aplicados (no existe)' }}
