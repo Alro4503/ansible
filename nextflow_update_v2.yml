@@ -56,6 +56,7 @@
         state: file
       become: yes
       when: nextflow_exists.stat.exists
+      notify: Mostrar resumen final
 
     # 6. VERIFICAR VERSIÓN DESPUÉS
     - name: Obtener versión después de actualizar
@@ -66,7 +67,7 @@
       changed_when: false
       when: nextflow_exists.stat.exists
 
-    # 7. EXTRAER SOLO LA VERSIÓN (LO IMPORTANTE)
+    # 7. EXTRAER SOLO LA VERSIÓN
     - name: Extraer solo el número de versión
       set_fact:
         version_before_clean: "{{ nextflow_version_before.stdout | regex_search('version\\s+[\\d.]+') | default('N/A') }}"
@@ -74,13 +75,13 @@
         update_success: "{{ 'SI' if 'installation completed' in update_result.stdout else 'NO' }}"
       when: nextflow_exists.stat.exists
 
-    # 8. MOSTRAR SOLO LO IMPORTANTE
-    - name: Mostrar resumen ultra limpio
+  handlers:
+    - name: Mostrar resumen final
       debug:
         msg: |
           {{ inventory_hostname }}:
-          📦 Nextflow instalado: {{ 'SÍ' if nextflow_exists.stat.exists else 'NO' }} \n
-          🔄 Actualización intentada: {{ 'SÍ' if nextflow_exists.stat.exists else 'NO' }} \n
+          📦 Nextflow instalado: {{ 'SÍ' if nextflow_exists.stat.exists else 'NO' }}
+          🔄 Actualización intentada: {{ 'SÍ' if nextflow_exists.stat.exists else 'NO' }}
           📜 Versión antes: {{ version_before_clean | default('N/A') }}
           📜 Versión después: {{ version_after_clean | default('N/A') }}
           🔒 Permisos 777: {{ 'APLICADOS' if nextflow_exists.stat.exists else 'NO' }}
