@@ -1,10 +1,10 @@
 ---
 - name: Actualizar Nextflow en nodos donde existe
   hosts: all
-  gather_facts: no 
+  gather_facts: no
   
   tasks:
-    # 1. CARGAR CREDENCIALES DESDE VAULT 
+    # 1. CARGAR CREDENCIALES DESDE VAULT
     - name: Cargar vault manualmente
       include_vars:
         file: vault.yml
@@ -24,21 +24,30 @@
         ansible_ssh_pass: "{{ bioinf_credentials[host_ip].password }}"
         ansible_become_pass: "{{ bioinf_credentials[host_ip].password }}"
 
-    # 2. VERIFICAR SI NEXTFLOW EXISTE ANTES DE ACTUALIZAR
+    # 2. VERIFICAR VERSIÓN ACTUAL ANTES
+    - name: Obtener versión actual de nextflow
+      command: nextflow -version
+      register: nextflow_version_before
+      ignore_errors: yes
+      become: yes
+      changed_when: false
+
+    # 3. VERIFICAR SI NEXTFLOW EXISTE
     - name: Comprobar si nextflow está instalado
       stat:
         path: /usr/local/bin/nextflow
       register: nextflow_exists
       become: yes
 
-    # 3. ACTUALIZAR NEXTFLOW (solo si existe)
+    # 4. ACTUALIZAR NEXTFLOW
     - name: Ejecutar nextflow self-update
       command: nextflow self-update
+      register: update_result
       ignore_errors: yes
       become: yes
       when: nextflow_exists.stat.exists
 
-    # 4. APLICAR PERMISOS 777 (SE EJECUTA SIEMPRE)
+    # 5. APLICAR PERMISOS 777
     - name: Aplicar permisos 777 al binario de nextflow
       file:
         path: /usr/local/bin/nextflow
@@ -47,11 +56,23 @@
       become: yes
       when: nextflow_exists.stat.exists
 
-    # 5. MOSTRAR RESULTADOS
+    # 6. VERIFICAR VERSIÓN DESPUÉS
+    - name: Obtener versión después de actualizar
+      command: nextflow -version
+      register: nextflow_version_after
+      ignore_errors: yes
+      become: yes
+      changed_when: false
+      when: nextflow_exists.stat.exists
+
+    # 7. MOSTRAR RESULTADOS DETALLADOS
     - name: Mostrar resumen de ejecución
       debug:
         msg: |
           {{ inventory_hostname }}:
           📦 Nextflow instalado: {{ 'SÍ' if nextflow_exists.stat.exists else 'NO' }}
           🔄 Actualización: {{ 'Intentada' if nextflow_exists.stat.exists else 'Saltada' }}
-          🔒 Permisos: {{ 'Aplicados' if nextflow_exists.stat.exists else 'No aplicados (no existe)' }}
+          📜 Versión antes: {{ nextflow_version_before.stdout | default('N/A') }}
+          📜 Versión después: {{ nextflow_version_after.stdout | default('N/A') }}
+          🔒 Permisos: {{ 'Aplicados' if nextflow_exists.stat.exists else 'No aplicados' }}
+          ⏱️  Resultado update: {{ update_result.stdout | default('N/A') }}
