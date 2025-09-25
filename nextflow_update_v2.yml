@@ -66,21 +66,22 @@
       changed_when: false
       when: nextflow_exists.stat.exists
 
-    # 7. LIMPIAR SALIDAS Y MOSTRAR RESULTADOS
-    - name: Limpiar las salidas de nextflow
+    # 7. EXTRAER SOLO LA VERSIÓN (LO IMPORTANTE)
+    - name: Extraer solo el número de versión
       set_fact:
-        clean_before: "{{ nextflow_version_before.stdout | regex_replace('[\\r\\u001b\\[K]', '') | trim | default('N/A') }}"
-        clean_after: "{{ nextflow_version_after.stdout | regex_replace('[\\r\\u001b\\[K]', '') | trim | default('N/A') }}"
-        clean_update: "{{ update_result.stdout | regex_replace('[\\r\\u001b\\[K]', '') | trim | default('N/A') }}"
+        version_before_clean: "{{ nextflow_version_before.stdout | regex_search('version\\s+[\\d.]+') | default('N/A') }}"
+        version_after_clean: "{{ nextflow_version_after.stdout | regex_search('version\\s+[\\d.]+') | default('N/A') }}"
+        update_success: "{{ 'SI' if 'installation completed' in update_result.stdout else 'NO' }}"
       when: nextflow_exists.stat.exists
 
-    - name: Mostrar resumen limpio
+    # 8. MOSTRAR SOLO LO IMPORTANTE
+    - name: Mostrar resumen ultra limpio
       debug:
         msg: |
           {{ inventory_hostname }}:
-           Nextflow instalado: {{ 'SÍ' if nextflow_exists.stat.exists else 'NO' }}
-           Actualización: {{ 'Intentada' if nextflow_exists.stat.exists else 'Saltada' }}
-           Versión antes: {{ clean_before | default('N/A') }}
-           Versión después: {{ clean_after | default('N/A') }}
-           Permisos: {{ 'Aplicados' if nextflow_exists.stat.exists else 'No aplicados' }}
-            Resultado update: {{ clean_update | default('N/A') }}
+          📦 Nextflow instalado: {{ 'SÍ' if nextflow_exists.stat.exists else 'NO' }} \n
+          🔄 Actualización intentada: {{ 'SÍ' if nextflow_exists.stat.exists else 'NO' }} \n
+          📜 Versión antes: {{ version_before_clean | default('N/A') }}
+          📜 Versión después: {{ version_after_clean | default('N/A') }}
+          🔒 Permisos 777: {{ 'APLICADOS' if nextflow_exists.stat.exists else 'NO' }}
+          ✅ Update exitoso: {{ update_success | default('N/A') }}
