@@ -78,9 +78,9 @@
       debug:
         msg: |
           {{ inventory_hostname }}:
-          📦 Nextflow instalado: {{ 'SÍ' if nextflow_exists.stat.exists else 'NO' }}
-          🔄 Actualización: {{ 'Intentada' if nextflow_exists.stat.exists else 'Saltada' }}
-          📜 Versión antes: {{ clean_before | default('N/A') }}
-          📜 Versión después: {{ clean_after | default('N/A') }}
-          🔒 Permisos: {{ 'Aplicados' if nextflow_exists.stat.exists else 'No aplicados' }}
-          ⏱️  Resultado update: {{ clean_update | default('N/A') }}
+           Nextflow instalado: {{ 'SÍ' if nextflow_exists.stat.exists else 'NO' }}
+           Actualización: {{ 'Intentada' if nextflow_exists.stat.exists else 'Saltada' }}
+           Versión antes: {{ clean_before | default('N/A') }}
+           Versión después: {{ clean_after | default('N/A') }}
+           Permisos: {{ 'Aplicados' if nextflow_exists.stat.exists else 'No aplicados' }}
+            Resultado update: {{ clean_update | default('N/A') }}
