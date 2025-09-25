@@ -1,0 +1,102 @@
+- name: Requeue automático CON CAMBIO DE NODE usando scontrol
+  hosts: all
+  become: yes
+  vars:
+    ansible_become_exe: "sudo -n"
+    max_wait_minutes: 5
+    check_interval_seconds: 30
+    
+  tasks:
+    - name: Obtener hostname completo
+      command: hostname -f
+      register: hostname_full
+      changed_when: false
+      
+    - name: Verificar jobs corriendo
+      shell: |
+        squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T:%B:%N" 2>/dev/null
+      register: running_jobs
+      changed_when: false
+      failed_when: false
+      
+    - name: Mostrar jobs encontrados
+      debug:
+        msg: "Jobs en {{ hostname_full.stdout }}: {{ running_jobs.stdout_lines }}"
+        
+    - name: Salir si no hay jobs
+      meta: end_play
+      when: running_jobs.stdout == ""
+      
+    - name: Obtener IDs de jobs para seguimiento
+      shell: |
+        squeue -h -w {{ hostname_full.stdout }} -o "%i" 2>/dev/null
+      register: original_job_ids
+      changed_when: false
+      failed_when: false
+      
+    - name: Guardar lista de IDs originales
+      set_fact:
+        original_jobs: "{{ original_job_ids.stdout_lines | select('match', '^[0-9]+$') | list }}"
+        
+    - name: Drainear nodo (esto permite que los jobs terminen naturalmente)
+      shell: |
+        scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Maintenance requeue"
+      register: drain_result
+      failed_when: drain_result.rc != 0
+      
+    - name: Esperar a que los jobs terminen naturalmente (Slurm los re-encola automáticamente)
+      shell: |
+        squeue -h -w {{ hostname_full.stdout }} -o "%i" 2>/dev/null
+      register: remaining_jobs
+      until: remaining_jobs.stdout == ""
+      retries: "{{ (max_wait_minutes * 60 / check_interval_seconds) | int }}"
+      delay: "{{ check_interval_seconds }}"
+      failed_when: false
+      changed_when: false
+      
+    - name: Forzar requeue de jobs pendientes si aún hay algunos después de esperar
+      block:
+        - name: Obtener jobs pendientes de requeue
+          shell: |
+            squeue -h -w {{ hostname_full.stdout }} -o "%i" 2>/dev/null
+          register: pending_requeue_jobs
+          changed_when: false
+          failed_when: false
+          
+        - name: Forzar requeue individual de jobs pendientes
+          shell: |
+            scontrol requeue {{ item }}
+          loop: "{{ pending_requeue_jobs.stdout_lines }}"
+          when: pending_requeue_jobs.stdout != ""
+          failed_when: false
+          
+        - name: Esperar confirmación de requeue
+          pause:
+            seconds: 10
+      when: remaining_jobs.stdout != ""
+      
+    - name: Verificar estado final de los jobs originales
+      shell: |
+        {% for job_id in original_jobs %}
+        echo "=== Job {{ job_id }} ==="
+        scontrol show job {{ job_id }} 2>/dev/null | grep -E "(JobId|JobState|NodeList|Reason)" || echo "Job completado o no encontrado"
+        echo ""
+        {% endfor %}
+      register: final_job_status
+      failed_when: false
+      
+    - name: Reactivar nodo
+      shell: |
+        scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
+      register: resume_result
+      failed_when: resume_result.rc != 0
+      
+    - name: Resultado final con verificación
+      debug:
+        msg: |
+          ✅ REQUEUE COMPLETADO en {{ hostname_full.stdout }}
+          - Jobs procesados: {{ original_jobs | length }}
+          - Jobs re-encolados automáticamente por Slurm: {{ (original_jobs | length) - (pending_requeue_jobs.stdout_lines | default([]) | length) }}
+          - Jobs con requeue forzado: {{ pending_requeue_jobs.stdout_lines | default([]) | length }}
+          - Verificación individual:
+          {{ final_job_status.stdout }}
