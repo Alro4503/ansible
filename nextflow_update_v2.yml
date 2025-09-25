@@ -24,20 +24,21 @@
         ansible_ssh_pass: "{{ bioinf_credentials[host_ip].password }}"
         ansible_become_pass: "{{ bioinf_credentials[host_ip].password }}"
 
-    # 2. VERIFICAR VERSIÓN ACTUAL ANTES
+    # 2. VERIFICAR SI NEXTFLOW EXISTE
+    - name: Comprobar si nextflow está instalado
+      stat:
+        path: /usr/local/bin/nextflow
+      register: nextflow_exists
+      become: yes
+
+    # 3. VERIFICAR VERSIÓN ACTUAL ANTES
     - name: Obtener versión actual de nextflow
       command: nextflow -version
       register: nextflow_version_before
       ignore_errors: yes
       become: yes
       changed_when: false
-
-    # 3. VERIFICAR SI NEXTFLOW EXISTE
-    - name: Comprobar si nextflow está instalado
-      stat:
-        path: /usr/local/bin/nextflow
-      register: nextflow_exists
-      become: yes
+      when: nextflow_exists.stat.exists
 
     # 4. ACTUALIZAR NEXTFLOW
     - name: Ejecutar nextflow self-update
@@ -65,14 +66,21 @@
       changed_when: false
       when: nextflow_exists.stat.exists
 
-    # 7. MOSTRAR RESULTADOS DETALLADOS
-    - name: Mostrar resumen de ejecución
+    # 7. LIMPIAR SALIDAS Y MOSTRAR RESULTADOS
+    - name: Limpiar las salidas de nextflow
+      set_fact:
+        clean_before: "{{ nextflow_version_before.stdout | regex_replace('[\\r\\u001b\\[K]', '') | trim | default('N/A') }}"
+        clean_after: "{{ nextflow_version_after.stdout | regex_replace('[\\r\\u001b\\[K]', '') | trim | default('N/A') }}"
+        clean_update: "{{ update_result.stdout | regex_replace('[\\r\\u001b\\[K]', '') | trim | default('N/A') }}"
+      when: nextflow_exists.stat.exists
+
+    - name: Mostrar resumen limpio
       debug:
         msg: |
           {{ inventory_hostname }}:
           📦 Nextflow instalado: {{ 'SÍ' if nextflow_exists.stat.exists else 'NO' }}
           🔄 Actualización: {{ 'Intentada' if nextflow_exists.stat.exists else 'Saltada' }}
-          📜 Versión antes: {{ nextflow_version_before.stdout | default('N/A') }}
-          📜 Versión después: {{ nextflow_version_after.stdout | default('N/A') }}
+          📜 Versión antes: {{ clean_before | default('N/A') }}
+          📜 Versión después: {{ clean_after | default('N/A') }}
           🔒 Permisos: {{ 'Aplicados' if nextflow_exists.stat.exists else 'No aplicados' }}
-          ⏱️  Resultado update: {{ update_result.stdout | default('N/A') }}
+          ⏱️  Resultado update: {{ clean_update | default('N/A') }}
