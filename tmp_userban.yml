@@ -3,7 +3,7 @@
   become: yes
   vars:
     ansible_become_exe: "sudo -n"
-    tmp_threshold_gb: 10
+    tmp_threshold_gb: 1
     
   tasks:
     - name: Obtener hostname
