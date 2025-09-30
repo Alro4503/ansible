@@ -1,48 +1,87 @@
-- name: Requeue automático CON DEBUG
-  hosts: bioinfpre3  # ⚠️ SOLO en el nodo que funciona
+- name: Requeue automático CON CAMBIO DE NODO
+  hosts: all
   become: yes
   vars:
     ansible_become_exe: "sudo -n"
     
   tasks:
-    - name: Obtener hostname actual
+    - name: Obtener hostname completo
       command: hostname -f
       register: hostname_full
       changed_when: false
       
-    - name: Verificar TODOS los nodos disponibles
+    - name: Encontrar nodo alternativo
       shell: |
-        sinfo -o "%N:%P:%T:%C" | grep -v DOWN
-      register: all_nodes
+        sinfo -p short -h -o "%N" | tr ',' '\n' | grep -v {{ hostname_full.stdout }} | grep -v down | head -1 || echo "NO_ALTERNATIVE"
+      register: alternative_node
       changed_when: false
+      failed_when: false
       
-    - name: Mostrar nodos disponibles
-      debug:
-        msg: "Nodos SLURM disponibles: {{ all_nodes.stdout_lines }}"
-        
-    - name: Verificar particiones
+    - name: Verificar jobs en este nodo
       shell: |
-        sinfo -o "%P:%N:%T" | grep -v down
-      register: partitions_info
+        squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T:%N:%P" 2>/dev/null || echo "NO_JOBS"
+      register: running_jobs
+      changed_when: false
+      failed_when: false
       
-    - name: Mostrar particiones
+    - name: Mostrar estado actual
       debug:
-        msg: "Particiones: {{ partitions_info.stdout_lines }}"
+        msg: |
+          "Nodo actual: {{ hostname_full.stdout }}"
+          "Nodo alternativo: {{ alternative_node.stdout }}"
+          "Jobs encontrados: {{ running_jobs.stdout_lines if running_jobs.stdout != 'NO_JOBS' else 'NINGUNO' }}"
         
-    - name: Verificar jobs en TODOS los nodos
-      shell: |
-        squeue -o "%i:%u:%j:%T:%N:%P:%b" | grep -E "(RUNNING|PENDING)"
-      register: all_jobs
-      
-    - name: Mostrar todos los jobs
+    - name: Salir si no hay jobs
       debug:
-        msg: "Jobs en cluster: {{ all_jobs.stdout_lines }}"
-        
-    - name: Verificar jobs en este nodo CON DETALLE
-      shell: |
-        squeue -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T:%N:%P:%b" 2>/dev/null
-      register: node_jobs_detail
+        msg: "✅ No hay jobs en {{ hostname_full.stdout }} - nada que hacer"
+      when: running_jobs.stdout == "NO_JOBS" or running_jobs.stdout == ""
       
-    - name: Mostrar jobs con detalles
-      debug:
-        msg: "Jobs en {{ hostname_full.stdout }}: {{ node_jobs_detail.stdout_lines }}"
+    - name: Continuar si hay jobs
+      block:
+        - name: Drainear nodo
+          shell: |
+            scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Auto-requeue to {{ alternative_node.stdout }}"
+          register: drain_result
+          failed_when: false
+          
+        - name: Esperar 15 segundos
+          pause:
+            seconds: 15
+          
+        - name: Requeuear jobs con cambio de nodo
+          shell: |
+            for jobid in $(squeue -h -w {{ hostname_full.stdout }} -o "%i" 2>/dev/null); do
+              echo "Procesando job $jobid"
+              {% if alternative_node.stdout != "NO_ALTERNATIVE" %}
+                echo "Moviendo job $jobid a {{ alternative_node.stdout }}"
+                scancel $jobid
+                sleep 2
+                # Obtener el script del job y reenviar
+                scontrol show job $jobid | grep "Command=" | cut -d= -f2 | xargs sbatch --nodelist={{ alternative_node.stdout }}
+              {% else %}
+                echo "Requeue normal del job $jobid"
+                scontrol requeue $jobid
+              {% endif %}
+            done
+          args:
+            executable: /bin/bash
+          register: requeue_result
+          failed_when: false
+          
+        - name: Esperar 30 segundos
+          pause:
+            seconds: 30
+          
+        - name: Reactivar nodo
+          shell: |
+            scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
+          register: resume_result
+          failed_when: false
+          
+        - name: Resultado final
+          debug:
+            msg:
+              - "✅ REQUEUE COMPLETADO en {{ hostname_full.stdout }}"
+              - "Jobs movidos: {{ running_jobs.stdout_lines | length }}"
+              - "Nodo destino: {{ alternative_node.stdout }}"
+      when: running_jobs.stdout != "NO_JOBS" and running_jobs.stdout != ""
