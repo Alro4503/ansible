@@ -1,0 +1,167 @@
+- name: Detección usuarios problemáticos y gestión de jobs
+  hosts: all
+  become: yes
+  vars:
+    ansible_become_exe: "sudo -n"
+    tmp_threshold_gb: 10  # Límite para considerar usuario problemático
+    
+  tasks:
+    - name: Obtener hostname
+      command: hostname -f
+      register: hostname_full
+      changed_when: false
+      
+    - name: Analizar uso de /tmp por usuario
+      shell: |
+        # Encontrar todos los usuarios con archivos en /tmp y calcular su tamaño
+        find /tmp -type f -exec stat -c "%U" {} \; 2>/dev/null | \
+        sort | uniq | \
+        while read user; do
+          size=$(find /tmp -user "$user" -type f -exec du -k {} \; 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
+          size_gb=$((size/1024/1024))
+          if [ $size_gb -gt {{ tmp_threshold_gb }} ]; then
+            echo "$user:$size_gb GB - PROBLEMÁTICO"
+          elif [ $size_gb -gt 0 ]; then
+            echo "$user:$size_gb GB - normal"
+          fi
+        done | sort -t: -k2 -nr
+      register: tmp_usage_all
+      changed_when: false
+      failed_when: false
+      
+    - name: Identificar usuarios problemáticos
+      set_fact:
+        problematic_users: "{{ tmp_usage_all.stdout_lines | select('match', '.*PROBLEMÁTICO') | map('regex_replace', '^(.*?):.*', '\\1') | list }}"
+      when: tmp_usage_all.stdout != ""
+      
+    - name: Mostrar análisis de /tmp
+      debug:
+        msg: |
+          "📊 ANÁLISIS USO /tmp:"
+          {% for line in tmp_usage_all.stdout_lines | default([]) %}
+          "   {{ line }}"
+          {% endfor %}
+          {% if tmp_usage_all.stdout == "" %}
+          "   No se encontraron archivos en /tmp"
+          {% endif %}
+          "🎯 Usuarios problemáticos: {{ problematic_users | default(['NINGUNO']) }}"
+      
+    - name: Obtener todos los jobs del nodo
+      shell: |
+        squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T" 2>/dev/null || echo "NO_JOBS"
+      register: all_jobs
+      changed_when: false
+      failed_when: false
+      
+    - name: Mostrar jobs encontrados
+      debug:
+        msg: |
+          "🔍 JOBS ENCONTRADOS:"
+          {% for job_line in all_jobs.stdout_lines | default([]) %}
+          "   {{ job_line }}"
+          {% endfor %}
+          {% if all_jobs.stdout == "NO_JOBS" %}
+          "   No hay jobs activos en este nodo"
+          {% endif %}
+      
+    - name: Separar jobs por tipo
+      set_fact:
+        jobs_normal: "{{ all_jobs.stdout_lines | select('match', '.*') | reject('search', ':' + (problematic_users | join('|')) + ':') | list }}"
+        jobs_problematic: "{{ all_jobs.stdout_lines | select('match', '.*') | select('search', ':' + (problematic_users | join('|')) + ':') | list }}"
+      when: all_jobs.stdout != "NO_JOBS"
+      
+    - name: Mostrar clasificación de jobs
+      debug:
+        msg: |
+          "🎪 CLASIFICACIÓN DE JOBS:"
+          "🟢 JOBS NORMALES (se moverán): {{ jobs_normal | default([]) | length }}"
+          {% for job in jobs_normal | default([]) %}
+          "     - {{ job }}"
+          {% endfor %}
+          "🔴 JOBS PROBLEMÁTICOS (se matarán): {{ jobs_problematic | default([]) | length }}"
+          {% for job in jobs_problematic | default([]) %}
+          "     - {{ job }}"
+          {% endfor %}
+      
+    - name: 1. DRAINEAR NODO - No nuevos jobs
+      shell: |
+        scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Limpieza automática /tmp"
+      register: drain_result
+      failed_when: false
+      
+    - name: Esperar 60 segundos para que jobs terminen naturalmente
+      pause:
+        seconds: 60
+        prompt: "⏳ Esperando 60s para que jobs terminen naturalmente..."
+      
+    - name: Obtener jobs que siguen activos después de la espera
+      shell: |
+        squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j" 2>/dev/null || echo "NO_JOBS"
+      register: remaining_jobs
+      changed_when: false
+      failed_when: false
+      
+    - name: Encontrar nodo alternativo
+      shell: |
+        sinfo -p short -h -o "%N" | tr ',' '\n' | grep -v {{ hostname_full.stdout }} | grep -v down | head -1 || echo "NO_ALTERNATIVE"
+      register: alternative_node
+      changed_when: false
+      
+    - name: 2. MOVER JOBS NORMALES restantes
+      block:
+        - name: Mover jobs normales a nodo alternativo
+          shell: |
+            {% for job_line in remaining_jobs.stdout_lines if job_line != "NO_JOBS" %}
+            {% set jobid = job_line.split(':')[0] %}
+            {% set user = job_line.split(':')[1] %}
+            {% if user not in (problematic_users | default([])) %}
+            echo "🟢 MOVIENDO job normal {{ jobid }} ({{ user }}) a {{ alternative_node.stdout }}"
+            scancel {{ jobid }}
+            sleep 2
+            script_path=$(scontrol show job {{ jobid }} | grep "Command=" | cut -d= -f2)
+            if [ -n "$script_path" ] && [ -f "$script_path" ]; then
+              sbatch --nodelist={{ alternative_node.stdout }} "$script_path"
+            else
+              echo "⚠️  No se pudo encontrar script para job {{ jobid }}"
+            fi
+            {% endif %}
+            {% endfor %}
+          args:
+            executable: /bin/bash
+          when: 
+            - remaining_jobs.stdout != "NO_JOBS"
+            - alternative_node.stdout != "NO_ALTERNATIVE"
+          failed_when: false
+      when: remaining_jobs.stdout != "NO_JOBS"
+      
+    - name: 3. MATAR JOBS PROBLEMÁTICOS restantes
+      shell: |
+        {% for job_line in remaining_jobs.stdout_lines if job_line != "NO_JOBS" %}
+        {% set jobid = job_line.split(':')[0] %}
+        {% set user = job_line.split(':')[1] %}
+        {% if user in (problematic_users | default([])) %}
+        echo "🔴 MATANDO job problemático {{ jobid }} ({{ user }})"
+        scancel {{ jobid }}
+        {% endif %}
+        {% endfor %}
+      args:
+        executable: /bin/bash
+      when: remaining_jobs.stdout != "NO_JOBS"
+      failed_when: false
+      
+    - name: Reactivar nodo
+      shell: |
+        scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
+      register: resume_result
+      failed_when: false
+      
+    - name: Resumen final
+      debug:
+        msg: |
+          "🎯 RESUMEN EJECUCIÓN:"
+          "📍 Nodo: {{ hostname_full.stdout }}"
+          "👤 Usuarios problemáticos detectados: {{ problematic_users | default(['NINGUNO']) }}"
+          "🟢 Jobs normales movidos: {{ jobs_normal | default([]) | length }}"
+          "🔴 Jobs problemáticos eliminados: {{ jobs_problematic | default([]) | length }}"
+          "🎪 Jobs restantes procesados: {{ remaining_jobs.stdout_lines | default([]) | length }}"
+          "🔀 Nodo destino: {{ alternative_node.stdout | default('NO_MOVIMIENTO') }}"
