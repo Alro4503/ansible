@@ -3,7 +3,7 @@
   become: yes
   vars:
     ansible_become_exe: "sudo -n"
-    tmp_threshold_gb: 10  # Límite para considerar usuario problemático
+    tmp_threshold_gb: 10
     
   tasks:
     - name: Obtener hostname
@@ -11,9 +11,12 @@
       register: hostname_full
       changed_when: false
       
+    - name: Inicializar lista de usuarios problemáticos vacía
+      set_fact:
+        problematic_users: []
+      
     - name: Analizar uso de /tmp por usuario
       shell: |
-        # Encontrar todos los usuarios con archivos en /tmp y calcular su tamaño
         find /tmp -type f -exec stat -c "%U" {} \; 2>/dev/null | \
         sort | uniq | \
         while read user; do
@@ -29,7 +32,7 @@
       changed_when: false
       failed_when: false
       
-    - name: Identificar usuarios problemáticos
+    - name: Actualizar lista de usuarios problemáticos si los hay
       set_fact:
         problematic_users: "{{ tmp_usage_all.stdout_lines | select('match', '.*PROBLEMÁTICO') | map('regex_replace', '^(.*?):.*', '\\1') | list }}"
       when: tmp_usage_all.stdout != ""
@@ -44,7 +47,7 @@
           {% if tmp_usage_all.stdout == "" %}
           "   No se encontraron archivos en /tmp"
           {% endif %}
-          "🎯 Usuarios problemáticos: {{ problematic_users | default(['NINGUNO']) }}"
+          "🎯 Usuarios problemáticos: {{ problematic_users }}"
       
     - name: Obtener todos los jobs del nodo
       shell: |
@@ -68,7 +71,17 @@
       set_fact:
         jobs_normal: "{{ all_jobs.stdout_lines | select('match', '.*') | reject('search', ':' + (problematic_users | join('|')) + ':') | list }}"
         jobs_problematic: "{{ all_jobs.stdout_lines | select('match', '.*') | select('search', ':' + (problematic_users | join('|')) + ':') | list }}"
-      when: all_jobs.stdout != "NO_JOBS"
+      when: 
+        - all_jobs.stdout != "NO_JOBS"
+        - problematic_users | length > 0
+      
+    - name: Si no hay usuarios problemáticos, todos los jobs son normales
+      set_fact:
+        jobs_normal: "{{ all_jobs.stdout_lines }}"
+        jobs_problematic: []
+      when: 
+        - all_jobs.stdout != "NO_JOBS"
+        - problematic_users | length == 0
       
     - name: Mostrar clasificación de jobs
       debug:
@@ -146,7 +159,9 @@
         {% endfor %}
       args:
         executable: /bin/bash
-      when: remaining_jobs.stdout != "NO_JOBS"
+      when: 
+        - remaining_jobs.stdout != "NO_JOBS"
+        - problematic_users | length > 0
       failed_when: false
       
     - name: Reactivar nodo
@@ -160,7 +175,7 @@
         msg: |
           "🎯 RESUMEN EJECUCIÓN:"
           "📍 Nodo: {{ hostname_full.stdout }}"
-          "👤 Usuarios problemáticos detectados: {{ problematic_users | default(['NINGUNO']) }}"
+          "👤 Usuarios problemáticos detectados: {{ problematic_users }}"
           "🟢 Jobs normales movidos: {{ jobs_normal | default([]) | length }}"
           "🔴 Jobs problemáticos eliminados: {{ jobs_problematic | default([]) | length }}"
           "🎪 Jobs restantes procesados: {{ remaining_jobs.stdout_lines | default([]) | length }}"
