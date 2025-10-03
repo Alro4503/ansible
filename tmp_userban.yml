@@ -76,21 +76,36 @@
       block:
         - name: Cancelar jobs de usuarios problemáticos
           shell: |
+            cancelled_jobs=""
             {% if problematic_users.stdout_lines | length > 0 %}
             echo "🚫 Cancelando jobs de usuarios con /tmp excesivo..."
             {% for line in problematic_users.stdout_lines %}
             user=$(echo "{{ line }}" | awk '{print $1}')
             size=$(echo "{{ line }}" | awk '{print $2}')
             echo "  Cancelando jobs de $user (${size}GB en /tmp)"
+            
+            # Guardar IDs de jobs antes de cancelar
+            for jobid in $(squeue -h -u $user -w {{ hostname_full.stdout }} -o "%i" 2>/dev/null); do
+              cancelled_jobs="$cancelled_jobs $jobid"
+              echo "    Job $jobid marcado para cancelación"
+            done
+            
             scancel -u $user -w {{ hostname_full.stdout }}
             {% endfor %}
+            echo "CANCELLED_JOBS:$cancelled_jobs"
             {% else %}
             echo "✅ No hay usuarios problemáticos - todos los jobs son elegibles"
+            echo "CANCELLED_JOBS:"
             {% endif %}
           args:
             executable: /bin/bash
           register: cancel_result
           failed_when: false
+          
+        - name: Esperar que se cancelen los jobs
+          pause:
+            seconds: 5
+          when: problematic_users.stdout_lines | length > 0
           
         - name: Drainear nodo
           shell: |
