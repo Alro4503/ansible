@@ -19,13 +19,14 @@
       - "/tmp/snap-private-tmp*"
     
   tasks:
-    - name: Crear directorio temporal personalizado
+    - name: Crear directorio temporal personalizado en nodo remoto
       file:
         path: "{{ custom_temp_dir }}"
         state: directory
         mode: '0700'
-      delegate_to: localhost
-      run_once: true
+      environment:
+        TMPDIR: "{{ custom_temp_dir }}"
+        TEMP: "{{ custom_temp_dir }}"
 
     - name: Obtener hostname completo
       command: hostname -f
@@ -84,7 +85,6 @@
         ! -path "/tmp/.XIM-unix*" \
         ! -path "/tmp/snap-private-tmp*" | wc -l
       register: old_files_count
-      become: yes
       environment:
         TMPDIR: "{{ custom_temp_dir }}"
 
@@ -104,7 +104,6 @@
         ! -path "/tmp/snap-private-tmp*" \
         -delete 2>/dev/null || true
       register: delete_files_result
-      become: yes
       when: old_files_count.stdout|int > 0
       failed_when: false
       environment:
@@ -122,7 +121,6 @@
         ! -path "/tmp/snap-private-tmp*" \
         ! -path "/tmp" | wc -l
       register: old_dirs_count
-      become: yes
       environment:
         TMPDIR: "{{ custom_temp_dir }}"
 
@@ -139,7 +137,6 @@
         ! -path "/tmp" \
         -exec rmdir {} + 2>/dev/null || true
       register: delete_dirs_result
-      become: yes
       when: old_dirs_count.stdout|int > 0
       failed_when: false
       environment:
@@ -184,8 +181,8 @@
       file:
         path: "{{ custom_temp_dir }}"
         state: absent
-      delegate_to: localhost
-      run_once: true
+      environment:
+        TMPDIR: "{{ custom_temp_dir }}"
 
     - name: Resultado final
       debug:
