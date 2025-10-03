@@ -1,9 +1,9 @@
-- name: Requeue automático CON FILTRO DE USUARIOS PROBLEMÁTICOS - ACCIÓN REAL
+- name: Requeue automático CON CAMBIO DE NODO y control de /tmp
   hosts: all
   become: yes
   vars:
     ansible_become_exe: "sudo -n"
-    tmp_threshold_gb: 0.1  # 100MB para prueba (bajo para detectar el archivo de 1GB)
+    tmp_size_limit_gb: 50  # Límite en GB para /tmp por usuario
     
   tasks:
     - name: Obtener hostname completo
@@ -11,25 +11,52 @@
       register: hostname_full
       changed_when: false
       
-    - name: Detectar usuarios problemáticos
+    - name: Detectar usuarios con archivos grandes en /tmp
       shell: |
-        find /tmp -maxdepth 1 -type f -exec stat -c "%U" {} \; 2>/dev/null | \
-        sort | uniq | \
-        while read user; do
-          size=$(find /tmp -maxdepth 1 -user "$user" -type f -exec du -k {} \; 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
-          size_gb=$(echo "scale=2; $size/1024/1024" | bc)
-          if (( $(echo "$size_gb > {{ tmp_threshold_gb }}" | bc -l) )); then
-            echo "$user:$size_gb GB"
-          fi
-        done
-      register: problematic_users_raw
+        du -sh /tmp/* 2>/dev/null | awk '{
+          size=$1; path=$2;
+          # Convertir tamaño a GB
+          if (size ~ /G$/) {
+            gsub(/G/, "", size);
+            size_gb = size + 0;
+          } else if (size ~ /M$/) {
+            gsub(/M/, "", size);
+            size_gb = size / 1024;
+          } else if (size ~ /K$/) {
+            gsub(/K/, "", size);
+            size_gb = size / 1024 / 1024;
+          } else {
+            size_gb = size / 1024 / 1024 / 1024;
+          }
+          
+          # Si supera el límite
+          if (size_gb > {{ tmp_size_limit_gb }}) {
+            # Extraer usuario del path
+            split(path, parts, "/");
+            for (i in parts) {
+              if (parts[i] ~ /^[a-z]/) {
+                print parts[i], size_gb;
+                break;
+              }
+            }
+          }
+        }' | sort -u
+      register: problematic_users
       changed_when: false
       failed_when: false
       
-    - name: Extraer nombres de usuarios problemáticos
-      set_fact:
-        problematic_users: "{{ problematic_users_raw.stdout_lines | map('regex_replace', '(.*):.*', '\\1') | list }}"
-        
+    - name: Mostrar usuarios problemáticos
+      debug:
+        msg: |
+          "⚠️  Usuarios con uso excesivo de /tmp (>{{ tmp_size_limit_gb }}GB):"
+          {% if problematic_users.stdout_lines | length > 0 %}
+          {% for line in problematic_users.stdout_lines %}
+          "  - {{ line }}"
+          {% endfor %}
+          {% else %}
+          "  Ninguno detectado"
+          {% endif %}
+      
     - name: Encontrar nodo alternativo
       shell: |
         sinfo -p short -h -o "%N" | tr ',' '\n' | grep -v {{ hostname_full.stdout }} | grep -v down | head -1 || echo "NO_ALTERNATIVE"
@@ -39,69 +66,110 @@
       
     - name: Verificar jobs en este nodo
       shell: |
-        squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T" 2>/dev/null || echo "NO_JOBS"
+        squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T:%N:%P" 2>/dev/null || echo "NO_JOBS"
       register: running_jobs
       changed_when: false
       failed_when: false
       
-    - name: Mostrar estado inicial
+    - name: Mostrar estado actual
       debug:
         msg: |
-          "🔍 ESTADO INICIAL:"
-          "Nodo: {{ hostname_full.stdout }}"
-          "Usuarios problemáticos: {{ problematic_users }} ({{ problematic_users_raw.stdout_lines }})"
+          "Nodo actual: {{ hostname_full.stdout }}"
           "Nodo alternativo: {{ alternative_node.stdout }}"
-          "Jobs encontrados: {{ running_jobs.stdout_lines | length }}"
+          "Jobs encontrados: {{ running_jobs.stdout_lines if running_jobs.stdout != 'NO_JOBS' else 'NINGUNO' }}"
         
     - name: Salir si no hay jobs
       debug:
-        msg: "✅ No hay jobs - nada que hacer"
-      when: running_jobs.stdout == "NO_JOBS"
+        msg: "✅ No hay jobs en {{ hostname_full.stdout }} - nada que hacer"
+      when: running_jobs.stdout == "NO_JOBS" or running_jobs.stdout == ""
       
-    - name: Procesar jobs
+    - name: Continuar si hay jobs
       block:
-        - name: Drainear nodo
+        - name: Cancelar jobs de usuarios problemáticos
           shell: |
-            scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Limpieza usuarios problemáticos"
-          failed_when: false
-          
-        - name: Esperar 10 segundos
-          pause:
-            seconds: 10
-            
-        - name: Procesar cada job
-          shell: |
-            {% for job_line in running_jobs.stdout_lines %}
-            {% set jobid = job_line.split(':')[0] %}
-            {% set user = job_line.split(':')[1] %}
-            {% set jobname = job_line.split(':')[2] %}
-            {% set state = job_line.split(':')[3] %}
-            
-            {% if user in problematic_users %}
-            echo "🔴 CANCELANDO job {{ jobid }} ({{ user }} - {{ jobname }}) - USUARIO PROBLEMÁTICO"
-            scancel {{ jobid }}
-            {% else %}
-            echo "🟢 REQUEUE job {{ jobid }} ({{ user }} - {{ jobname }})"
-            scontrol requeue {{ jobid }}
-            {% endif %}
+            {% if problematic_users.stdout_lines | length > 0 %}
+            echo "🚫 Cancelando jobs de usuarios con /tmp excesivo..."
+            {% for line in problematic_users.stdout_lines %}
+            user=$(echo "{{ line }}" | awk '{print $1}')
+            size=$(echo "{{ line }}" | awk '{print $2}')
+            echo "  Cancelando jobs de $user (${size}GB en /tmp)"
+            scancel -u $user -w {{ hostname_full.stdout }}
             {% endfor %}
+            {% else %}
+            echo "✅ No hay usuarios problemáticos - todos los jobs son elegibles"
+            {% endif %}
           args:
             executable: /bin/bash
+          register: cancel_result
           failed_when: false
           
-        - name: Esperar 5 segundos
+        - name: Drainear nodo
+          shell: |
+            scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Auto-requeue to {{ alternative_node.stdout }}"
+          register: drain_result
+          failed_when: false
+          
+        - name: Esperar 15 segundos
           pause:
-            seconds: 5
+            seconds: 15
+          
+        - name: Requeuear jobs restantes con cambio de nodo
+          shell: |
+            # Crear lista de usuarios problemáticos
+            problematic_users=""
+            {% if problematic_users.stdout_lines | length > 0 %}
+            {% for line in problematic_users.stdout_lines %}
+            problematic_users="$problematic_users $(echo '{{ line }}' | awk '{print $1}')"
+            {% endfor %}
+            {% endif %}
+            
+            for jobline in $(squeue -h -w {{ hostname_full.stdout }} -o "%i:%u" 2>/dev/null); do
+              jobid=$(echo $jobline | cut -d: -f1)
+              jobuser=$(echo $jobline | cut -d: -f2)
+              
+              # Verificar si el usuario es problemático
+              skip=0
+              for puser in $problematic_users; do
+                if [ "$jobuser" = "$puser" ]; then
+                  echo "⏭️  Saltando job $jobid del usuario problemático $jobuser"
+                  skip=1
+                  break
+                fi
+              done
+              
+              if [ $skip -eq 0 ]; then
+                echo "✅ Procesando job $jobid del usuario $jobuser"
+                {% if alternative_node.stdout != "NO_ALTERNATIVE" %}
+                  echo "  Moviendo job $jobid a {{ alternative_node.stdout }}"
+                  scancel $jobid
+                  sleep 2
+                  scontrol show job $jobid | grep "Command=" | cut -d= -f2 | xargs sbatch --nodelist={{ alternative_node.stdout }}
+                {% else %}
+                  echo "  Requeue normal del job $jobid"
+                  scontrol requeue $jobid
+                {% endif %}
+              fi
+            done
+          args:
+            executable: /bin/bash
+          register: requeue_result
+          failed_when: false
+          
+        - name: Esperar 30 segundos
+          pause:
+            seconds: 30
           
         - name: Reactivar nodo
           shell: |
             scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
+          register: resume_result
           failed_when: false
           
         - name: Resultado final
           debug:
-            msg: |
-              "✅ OPERACIÓN COMPLETADA en {{ hostname_full.stdout }}"
-              "Usuarios problemáticos: {{ problematic_users }}"
-              "Jobs procesados: {{ running_jobs.stdout_lines | length }}"
-      when: running_jobs.stdout != "NO_JOBS"
+            msg:
+              - "✅ REQUEUE COMPLETADO en {{ hostname_full.stdout }}"
+              - "Jobs totales procesados: {{ running_jobs.stdout_lines | length }}"
+              - "Usuarios problemáticos cancelados: {{ problematic_users.stdout_lines | length }}"
+              - "Nodo destino: {{ alternative_node.stdout }}"
+      when: running_jobs.stdout != "NO_JOBS" and running_jobs.stdout != ""
