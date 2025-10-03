@@ -1,8 +1,27 @@
 ---
-- name: Test conexión básico
+- name: Test conexión usando /dev/shm como temporal
   hosts: all
   gather_facts: no
+  vars:
+    # FORZAR uso de /dev/shm como directorio temporal
+    ansible_remote_tmp: /dev/shm/ansible_test
+    ansible_local_tmp: /dev/shm/ansible_test
   
   tasks:
-    - name: Probar ping
+    - name: Crear directorio temporal en /dev/shm
+      file:
+        path: /dev/shm/ansible_test
+        state: directory
+        mode: '0700'
+
+    - name: Probar conexión básica
       ansible.builtin.ping:
+
+    - name: Mostrar que funciona
+      debug:
+        msg: "✅ ¡Conexión exitosa usando /dev/shm como temporal!"
+
+    - name: Limpiar directorio temporal de test
+      file:
+        path: /dev/shm/ansible_test
+        state: absent
