@@ -3,7 +3,7 @@
   become: yes
   vars:
     ansible_become_exe: "sudo -n"
-    tmp_size_limit_gb: 50  # Límite en GB para /tmp por usuario
+    tmp_size_limit_gb: 1  # Límite en GB para /tmp por usuario
     
   tasks:
     - name: Obtener hostname completo
