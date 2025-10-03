@@ -1,27 +1,29 @@
 ---
-- name: Test conexión usando /dev/shm como temporal
+- name: Test conexión EXTRA SEGURO
   hosts: all
   gather_facts: no
-  vars:
-    # FORZAR uso de /dev/shm como directorio temporal
-    ansible_remote_tmp: /dev/shm/ansible_test
-    ansible_local_tmp: /dev/shm/ansible_test
   
   tasks:
-    - name: Crear directorio temporal en /dev/shm
-      file:
-        path: /dev/shm/ansible_test
-        state: directory
-        mode: '0700'
+    - name: Verificar espacio en /mnt/bioinfnas2/sarcoma
+      shell: df -h /mnt/bioinfnas2/sarcoma | tail -1
+      register: sarcoma_space
+      changed_when: false
 
-    - name: Probar conexión básica
-      ansible.builtin.ping:
-
-    - name: Mostrar que funciona
+    - name: Mostrar espacio disponible
       debug:
-        msg: "✅ ¡Conexión exitosa usando /dev/shm como temporal!"
+        msg: "Espacio en sarcoma: {{ sarcoma_space.stdout }}"
 
-    - name: Limpiar directorio temporal de test
-      file:
-        path: /dev/shm/ansible_test
-        state: absent
+    - name: Crear directorio temporal con nombre único
+      raw: |
+        mkdir -p /mnt/bioinfnas2/sarcoma/ansible_test_{{ ansible_date_time.epoch }}
+        chmod 700 /mnt/bioinfnas2/sarcoma/ansible_test_{{ ansible_date_time.epoch }}
+      changed_when: false
+
+    - name: Probar conexión
+      ansible.builtin.ping:
+      environment:
+        TMPDIR: /mnt/bioinfnas2/sarcoma/ansible_test_{{ ansible_date_time.epoch }}
+
+    - name: Limpieza garantizada
+      raw: rm -rf /mnt/bioinfnas2/sarcoma/ansible_test_{{ ansible_date_time.epoch }}
+      changed_when: false
