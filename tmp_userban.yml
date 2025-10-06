@@ -13,23 +13,43 @@
       
     - name: Detectar usuarios con archivos grandes en /tmp
       shell: |
-        for file in /tmp/*; do
+        # Inicializar array asociativo para usuarios
+        declare -A user_sizes
+        
+        for file in /tmp/* /tmp/.*; do
+          # Saltar . y ..
+          if [[ "$file" == "/tmp/." || "$file" == "/tmp/.." ]]; then
+            continue
+          fi
+          
           if [ -e "$file" ]; then
             size_kb=$(du -sk "$file" 2>/dev/null | awk '{print $1}')
-            owner=$(stat -c '%U' "$file" 2>/dev/null)
+            owner=$(stat -c '%U' "$file" 2>/dev/null 2>/dev/null || echo "unknown")
             
-            if [ ! -z "$size_kb" ] && [ ! -z "$owner" ]; then
-              size_gb=$(echo "scale=2; $size_kb / 1024 / 1024" | bc)
+            if [ ! -z "$size_kb" ] && [ ! -z "$owner" ] && [ "$owner" != "unknown" ]; then
+              size_gb=$(echo "scale=2; $size_kb / 1024 / 1024" | bc 2>/dev/null || echo "0")
               
-              # Comparar con límite
-              over_limit=$(echo "$size_gb > {{ tmp_size_limit_gb }}" | bc)
-              
-              if [ "$over_limit" -eq 1 ]; then
-                echo "$owner $size_gb"
+              # Solo procesar si bc funcionó
+              if [[ ! -z "$size_gb" && "$size_gb" != "0" ]]; then
+                # Comparar con límite
+                over_limit=$(echo "$size_gb > {{ tmp_size_limit_gb }}" | bc 2>/dev/null || echo "0")
+                
+                if [ "$over_limit" -eq 1 ]; then
+                  user_sizes["$owner"]=$(echo "${user_sizes[$owner]:-0} + $size_gb" | bc 2>/dev/null || echo "${user_sizes[$owner]:-0}")
+                fi
               fi
             fi
           fi
-        done | awk '{users[$1]+=$2} END {for (u in users) if (users[u] > {{ tmp_size_limit_gb }}) print u, users[u]}' | sort -u
+        done
+        
+        # Imprimir usuarios que superan el límite
+        for user in "${!user_sizes[@]}"; do
+          total_size=${user_sizes[$user]}
+          limit_check=$(echo "$total_size > {{ tmp_size_limit_gb }}" | bc 2>/dev/null || echo "0")
+          if [ "$limit_check" -eq 1 ]; then
+            echo "$user $total_size"
+          fi
+        done
       register: problematic_users
       changed_when: false
       failed_when: false
@@ -74,28 +94,34 @@
       
     - name: Continuar si hay jobs
       block:
+        - name: Extraer lista de usuarios problemáticos
+          set_fact:
+            problematic_users_list: "{{ problematic_users.stdout_lines | map('regex_replace', '^(\\S+).*', '\\1') | list }}"
+          when: problematic_users.stdout_lines | length > 0
+          
+        - name: Inicializar lista vacía si no hay usuarios problemáticos
+          set_fact:
+            problematic_users_list: []
+          when: problematic_users.stdout_lines | length == 0
+        
         - name: Cancelar jobs de usuarios problemáticos
           shell: |
-            cancelled_jobs=""
-            {% if problematic_users.stdout_lines | length > 0 %}
             echo "🚫 Cancelando jobs de usuarios con /tmp excesivo..."
-            {% for line in problematic_users.stdout_lines %}
-            user=$(echo "{{ line }}" | awk '{print $1}')
-            size=$(echo "{{ line }}" | awk '{print $2}')
-            echo "  Cancelando jobs de $user (${size}GB en /tmp)"
-            
-            # Guardar IDs de jobs antes de cancelar
-            for jobid in $(squeue -h -u $user -w {{ hostname_full.stdout }} -o "%i" 2>/dev/null); do
-              cancelled_jobs="$cancelled_jobs $jobid"
-              echo "    Job $jobid marcado para cancelación"
-            done
-            
-            scancel -u $user -w {{ hostname_full.stdout }}
+            {% if problematic_users_list | length > 0 %}
+            {% for user in problematic_users_list %}
+            echo "  Cancelando jobs de {{ user }}"
+            # Obtener y cancelar jobs del usuario
+            user_jobs=$(squeue -h -u {{ user }} -w {{ hostname_full.stdout }} -o "%i" 2>/dev/null)
+            if [ ! -z "$user_jobs" ]; then
+              echo "    Jobs encontrados: $user_jobs"
+              scancel -u {{ user }} -w {{ hostname_full.stdout }}
+              echo "    Jobs cancelados para {{ user }}"
+            else
+              echo "    No hay jobs activos para {{ user }}"
+            fi
             {% endfor %}
-            echo "CANCELLED_JOBS:$cancelled_jobs"
             {% else %}
-            echo "✅ No hay usuarios problemáticos - todos los jobs son elegibles"
-            echo "CANCELLED_JOBS:"
+            echo "✅ No hay usuarios problemáticos - no se cancela ningún job"
             {% endif %}
           args:
             executable: /bin/bash
@@ -104,52 +130,69 @@
           
         - name: Esperar que se cancelen los jobs
           pause:
-            seconds: 5
-          when: problematic_users.stdout_lines | length > 0
+            seconds: 10
+          when: problematic_users_list | length > 0
           
         - name: Drainear nodo
           shell: |
-            scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Auto-requeue to {{ alternative_node.stdout }}"
+            echo "🔧 Draneando nodo {{ hostname_full.stdout }}..."
+            scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Auto-requeue mantenimiento"
           register: drain_result
           failed_when: false
           
-        - name: Esperar 15 segundos
+        - name: Verificar estado del draneo
+          shell: |
+            sinfo -n {{ hostname_full.stdout }} -h -o "%t"
+          register: node_state
+          changed_when: false
+          
+        - name: Mostrar estado del nodo
+          debug:
+            msg: "Estado del nodo {{ hostname_full.stdout }}: {{ node_state.stdout }}"
+          
+        - name: Esperar 15 segundos para que los jobs terminen
           pause:
             seconds: 15
           
-        - name: Requeuear jobs restantes con cambio de nodo
+        - name: Requeuear jobs restantes (SOLO usuarios no problemáticos)
           shell: |
-            # Crear lista de usuarios problemáticos
-            problematic_users=""
-            {% if problematic_users.stdout_lines | length > 0 %}
-            {% for line in problematic_users.stdout_lines %}
-            problematic_users="$problematic_users $(echo '{{ line }}' | awk '{print $1}')"
-            {% endfor %}
-            {% endif %}
+            echo "🔄 Requeueando jobs de usuarios no problemáticos..."
+            # Obtener todos los jobs restantes en el nodo
+            remaining_jobs=$(squeue -h -w {{ hostname_full.stdout }} -o "%i:%u" 2>/dev/null)
             
-            for jobline in $(squeue -h -w {{ hostname_full.stdout }} -o "%i:%u" 2>/dev/null); do
-              jobid=$(echo $jobline | cut -d: -f1)
-              jobuser=$(echo $jobline | cut -d: -f2)
-              
+            if [ -z "$remaining_jobs" ]; then
+              echo "✅ No hay jobs restantes para requeue"
+              exit 0
+            fi
+            
+            echo "$remaining_jobs" | while IFS=: read jobid jobuser; do
               # Verificar si el usuario es problemático
-              skip=0
-              for puser in $problematic_users; do
-                if [ "$jobuser" = "$puser" ]; then
-                  echo "⏭️  Saltando job $jobid del usuario problemático $jobuser"
-                  skip=1
-                  break
-                fi
-              done
+              is_problematic=0
+              {% for puser in problematic_users_list %}
+              if [ "{{ puser }}" = "$jobuser" ]; then
+                is_problematic=1
+              fi
+              {% endfor %}
               
-              if [ $skip -eq 0 ]; then
+              if [ $is_problematic -eq 1 ]; then
+                echo "⏭️  Saltando job $jobid del usuario problemático $jobuser"
+              else
                 echo "✅ Procesando job $jobid del usuario $jobuser"
                 {% if alternative_node.stdout != "NO_ALTERNATIVE" %}
                   echo "  Moviendo job $jobid a {{ alternative_node.stdout }}"
-                  scancel $jobid
-                  sleep 2
-                  scontrol show job $jobid | grep "Command=" | cut -d= -f2 | xargs sbatch --nodelist={{ alternative_node.stdout }}
+                  # Primero obtener los detalles del job antes de cancelar
+                  job_info=$(scontrol show job $jobid)
+                  if [ $? -eq 0 ]; then
+                    # Cancelar y resubmit en nuevo nodo
+                    scancel $jobid
+                    sleep 2
+                    # Recrear el job con el nuevo nodo
+                    scontrol show job $jobid | grep "Command=" | cut -d= -f2 | xargs sbatch --nodelist={{ alternative_node.stdout }}
+                  else
+                    echo "  ❌ No se pudo obtener info del job $jobid"
+                  fi
                 {% else %}
-                  echo "  Requeue normal del job $jobid"
+                  echo "  🔄 Requeue normal del job $jobid"
                   scontrol requeue $jobid
                 {% endif %}
               fi
@@ -159,21 +202,29 @@
           register: requeue_result
           failed_when: false
           
-        - name: Esperar 30 segundos
+        - name: Esperar 30 segundos para que se completen los requeues
           pause:
             seconds: 30
           
         - name: Reactivar nodo
           shell: |
+            echo "🔄 Reactivando nodo {{ hostname_full.stdout }}..."
             scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
           register: resume_result
           failed_when: false
+          
+        - name: Verificar estado final del nodo
+          shell: |
+            sinfo -n {{ hostname_full.stdout }} -h -o "%t"
+          register: final_node_state
+          changed_when: false
           
         - name: Resultado final
           debug:
             msg:
               - "✅ REQUEUE COMPLETADO en {{ hostname_full.stdout }}"
-              - "Jobs totales procesados: {{ running_jobs.stdout_lines | length }}"
-              - "Usuarios problemáticos cancelados: {{ problematic_users.stdout_lines | length }}"
+              - "Usuarios problemáticos detectados: {{ problematic_users_list }}"
+              - "Jobs cancelados (usuarios problemáticos): {{ problematic_users_list | length }}"
               - "Nodo destino: {{ alternative_node.stdout }}"
+              - "Estado final del nodo: {{ final_node_state.stdout }}"
       when: running_jobs.stdout != "NO_JOBS" and running_jobs.stdout != ""
