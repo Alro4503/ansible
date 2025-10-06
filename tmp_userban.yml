@@ -3,7 +3,7 @@
   become: yes
   vars:
     ansible_become_exe: "sudo -n"
-    tmp_size_limit_gb: 0.1  # Límite en GB para /tmp por usuario (100MB para pruebas)
+    tmp_size_limit_gb: 100  # Límite en GB para /tmp por usuario (100MB para pruebas)
     time_limit_minutes: 5   # Jobs que superen este tiempo serán requeued
     
   tasks:
