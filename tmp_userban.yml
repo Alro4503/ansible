@@ -1,10 +1,10 @@
-- name: Requeue automático con control de tiempo y /tmp
+- name: Requeue automático con control de tiempo, timeout y /tmp
   hosts: all
   become: yes
   vars:
     ansible_become_exe: "sudo -n"
-    tmp_size_limit_gb: 100  # Límite en GB para /tmp por usuario (100MB para pruebas)
-    time_limit_minutes: 5   # Jobs que superen este tiempo serán requeued
+    tmp_size_limit_gb: 100  # Límite en GB para /tmp por usuario
+    wait_timeout_minutes: 1  # Timeout para esperar que jobs terminen normalmente (1 min para pruebas)
     
   tasks:
     - name: Obtener hostname completo
@@ -59,7 +59,7 @@
       
     - name: Verificar jobs en el nodo
       shell: |
-        squeue -h -w {{ hostname_full.stdout }} -o "%i:%u" 2>/dev/null || echo ""
+        squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%T" 2>/dev/null || echo ""
       register: all_jobs
       changed_when: false
       failed_when: false
@@ -71,22 +71,69 @@
           Nodo alternativo: {{ alternative_node.stdout }}
           Jobs encontrados: {{ all_jobs.stdout_lines | length }}
           Usuarios problemáticos: {{ problematic_users.stdout_lines | length }}
+          Timeout de espera: {{ wait_timeout_minutes }} minutos
         
     - name: Salir si no hay jobs que procesar
       meta: end_play
       when: all_jobs.stdout == "" or all_jobs.stdout_lines | length == 0
-      
-    - name: DRAINEAR NODO al inicio del proceso
+
+    - name: Notificar inicio de proceso con timeout
+      debug:
+        msg: |
+          🕒 INICIANDO PROCESO CON TIMEOUT
+          Se esperará {{ wait_timeout_minutes }} minuto(s) para que los jobs terminen normalmente
+          Si no completan en ese tiempo, se procederá con requeue/cancelación
+          
+    - name: Esperar que jobs terminen normalmente (con timeout)
       shell: |
-        scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Auto-requeue: procesando jobs con tiempo excedido"
+        timeout_seconds=$(( {{ wait_timeout_minutes }} * 60 ))
+        end_time=$(( $(date +%s) + $timeout_seconds ))
+        
+        echo "⏳ Esperando máximo {{ wait_timeout_minutes }} minuto(s)..."
+        
+        while [ $(date +%s) -lt $end_time ]; do
+          remaining_jobs=$(squeue -h -w {{ hostname_full.stdout }} -o "%i" 2>/dev/null | wc -l)
+          
+          if [ $remaining_jobs -eq 0 ]; then
+            echo "✅ Todos los jobs completaron normalmente"
+            exit 0
+          fi
+          
+          echo "  Jobs pendientes: $remaining_jobs - Tiempo restante: $(( (end_time - $(date +%s)) / 60 )) min"
+          sleep 30
+        done
+        
+        echo "⏰ Timeout alcanzado. Procediendo con acciones..."
+        exit 1
+      register: wait_result
+      changed_when: false
+      failed_when: wait_result.rc != 0 and wait_result.rc != 1
+      
+    - name: Verificar si quedan jobs después del timeout
+      shell: |
+        squeue -h -w {{ hostname_full.stdout }} -o "%i:%u" 2>/dev/null || echo ""
+      register: remaining_jobs
+      changed_when: false
+      failed_when: false
+      when: wait_result.rc == 1  # Solo si timeout se alcanzó
+      
+    - name: Salir si no quedan jobs después de la espera
+      meta: end_play
+      when: wait_result.rc == 0 or remaining_jobs.stdout == "" or remaining_jobs.stdout_lines | length == 0
+      
+    - name: DRAINEAR NODO (solo si timeout se alcanzó y hay jobs pendientes)
+      shell: |
+        scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Auto-requeue: timeout alcanzado, procesando jobs pendientes"
       register: drain_result
       failed_when: false
+      when: wait_result.rc == 1 and remaining_jobs.stdout_lines | length > 0
       
     - name: Esperar que el drain se aplique
       pause:
         seconds: 5
+      when: wait_result.rc == 1 and remaining_jobs.stdout_lines | length > 0
         
-    - name: Cancelar jobs de usuarios problemáticos
+    - name: Cancelar jobs de usuarios problemáticos (después de timeout)
       shell: |
         problematic_users=""
         {% if problematic_users.stdout_lines | length > 0 %}
@@ -98,7 +145,7 @@
         echo "🚫 Cancelando jobs de usuarios con /tmp excesivo..."
         cancelled_count=0
         
-        {% for job_line in all_jobs.stdout_lines %}
+        {% for job_line in remaining_jobs.stdout_lines %}
         jobid=$(echo "{{ job_line }}" | cut -d: -f1)
         jobuser=$(echo "{{ job_line }}" | cut -d: -f2)
         
@@ -121,14 +168,14 @@
       args:
         executable: /bin/bash
       register: cancel_result
-      when: problematic_users.stdout_lines | length > 0
+      when: wait_result.rc == 1 and problematic_users.stdout_lines | length > 0 and remaining_jobs.stdout_lines | length > 0
       
     - name: Esperar que se cancelen los jobs
       pause:
         seconds: 10
-      when: problematic_users.stdout_lines | length > 0
+      when: wait_result.rc == 1 and problematic_users.stdout_lines | length > 0 and remaining_jobs.stdout_lines | length > 0
           
-    - name: Requeuear jobs restantes (usuarios limpios) con cambio de nodo
+    - name: Requeuear jobs restantes después de timeout (usuarios limpios) con cambio de nodo
       shell: |
         problematic_users=""
         {% if problematic_users.stdout_lines | length > 0 %}
@@ -137,10 +184,10 @@
         {% endfor %}
         {% endif %}
         
-        echo "♻️  Requeuing jobs de usuarios sin problemas..."
+        echo "♻️  Requeuing jobs de usuarios sin problemas (después de timeout)..."
         requeued_count=0
         
-        {% for job_line in all_jobs.stdout_lines %}
+        {% for job_line in remaining_jobs.stdout_lines %}
         jobid=$(echo "{{ job_line }}" | cut -d: -f1)
         jobuser=$(echo "{{ job_line }}" | cut -d: -f2)
         
@@ -181,16 +228,19 @@
         executable: /bin/bash
       register: requeue_result
       failed_when: false
+      when: wait_result.rc == 1 and remaining_jobs.stdout_lines | length > 0
           
     - name: Esperar que los jobs se requeueen
       pause:
         seconds: 30
+      when: wait_result.rc == 1 and remaining_jobs.stdout_lines | length > 0
           
     - name: Reactivar nodo
       shell: |
         scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
       register: resume_result
       failed_when: false
+      when: wait_result.rc == 1
       
     - name: Limpiar archivo temporal
       file:
@@ -199,8 +249,13 @@
       
     - name: Resultado final
       debug:
-        msg:
-          - "✅ PROCESO COMPLETADO en {{ hostname_full.stdout }}"
-          - "Jobs totales: {{ all_jobs.stdout_lines | length }}"
-          - "Usuarios problemáticos: {{ problematic_users.stdout_lines | length }}"
-          - "Nodo destino: {{ alternative_node.stdout }}"
+        msg: |
+          {% if wait_result.rc == 0 %}
+          "✅ TODOS LOS JOBS COMPLETARON NORMALMENTE dentro del timeout"
+          {% else %}
+          "✅ PROCESO COMPLETADO después de timeout en {{ hostname_full.stdout }}"
+          "Jobs originales: {{ all_jobs.stdout_lines | length }}"
+          "Jobs pendientes después de timeout: {{ remaining_jobs.stdout_lines | length }}"
+          "Usuarios problemáticos: {{ problematic_users.stdout_lines | length }}"
+          "Nodo destino: {{ alternative_node.stdout }}"
+          {% endif %}
