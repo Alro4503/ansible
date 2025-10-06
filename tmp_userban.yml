@@ -3,7 +3,7 @@
   become: yes
   vars:
     ansible_become_exe: "sudo -n"
-    tmp_size_limit_gb: 100  # Límite en GB para /tmp por usuario
+    tmp_size_limit_gb: 0.1  # Límite en GB para /tmp por usuario
     wait_timeout_minutes: 1  # Timeout para esperar que jobs terminen normalmente (1 min para pruebas)
     
   tasks:
