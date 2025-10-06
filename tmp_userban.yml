@@ -4,7 +4,7 @@
   vars:
     ansible_become_exe: "sudo -n"
     tmp_size_limit_gb: 0.1  # Límite en GB para /tmp por usuario (100MB para pruebas)
-    time_limit_minutes: 5   # Jobs que superen este tiempo serán requeued (5 min para pruebas)
+    time_limit_minutes: 5   # Jobs que superen este tiempo serán requeued
     
   tasks:
     - name: Obtener hostname completo
@@ -57,32 +57,10 @@
       changed_when: false
       failed_when: false
       
-    - name: Verificar jobs que exceden tiempo límite
+    - name: Verificar jobs en el nodo
       shell: |
-        time_limit_minutes={{ time_limit_minutes }}
-        
-        squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%M" 2>/dev/null | while IFS=: read jobid user elapsed; do
-          # Convertir tiempo elapsed a minutos
-          if echo "$elapsed" | grep -q "-"; then
-            days=$(echo "$elapsed" | cut -d- -f1)
-            time_part=$(echo "$elapsed" | cut -d- -f2)
-            hours=$(echo "$time_part" | cut -d: -f1)
-            minutes=$(echo "$time_part" | cut -d: -f2)
-            total_minutes=$((days * 24 * 60 + hours * 60 + minutes))
-          elif [ $(echo "$elapsed" | tr -cd ':' | wc -c) -eq 2 ]; then
-            hours=$(echo "$elapsed" | cut -d: -f1)
-            minutes=$(echo "$elapsed" | cut -d: -f2)
-            total_minutes=$((hours * 60 + minutes))
-          else
-            minutes=$(echo "$elapsed" | cut -d: -f1)
-            total_minutes=$minutes
-          fi
-          
-          if [ $total_minutes -gt $time_limit_minutes ]; then
-            echo "$jobid:$user:$elapsed:$total_minutes"
-          fi
-        done
-      register: long_running_jobs
+        squeue -h -w {{ hostname_full.stdout }} -o "%i:%u" 2>/dev/null || echo ""
+      register: all_jobs
       changed_when: false
       failed_when: false
       
@@ -91,17 +69,12 @@
         msg: |
           Nodo actual: {{ hostname_full.stdout }}
           Nodo alternativo: {{ alternative_node.stdout }}
-          Jobs con tiempo excedido: {{ long_running_jobs.stdout_lines | length }}
-          {% if long_running_jobs.stdout_lines | length > 0 %}
-          Detalles:
-          {% for job in long_running_jobs.stdout_lines %}
-            - Job {{ job.split(':')[0] }} del usuario {{ job.split(':')[1] }} - Tiempo: {{ job.split(':')[2] }}
-          {% endfor %}
-          {% endif %}
+          Jobs encontrados: {{ all_jobs.stdout_lines | length }}
+          Usuarios problemáticos: {{ problematic_users.stdout_lines | length }}
         
     - name: Salir si no hay jobs que procesar
       meta: end_play
-      when: long_running_jobs.stdout == "" or long_running_jobs.stdout_lines | length == 0
+      when: all_jobs.stdout == "" or all_jobs.stdout_lines | length == 0
       
     - name: DRAINEAR NODO al inicio del proceso
       shell: |
@@ -113,9 +86,8 @@
       pause:
         seconds: 5
         
-    - name: Cancelar jobs de usuarios problemáticos que exceden tiempo
+    - name: Cancelar jobs de usuarios problemáticos
       shell: |
-        # Leer usuarios problemáticos
         problematic_users=""
         {% if problematic_users.stdout_lines | length > 0 %}
         {% for line in problematic_users.stdout_lines %}
@@ -126,12 +98,10 @@
         echo "🚫 Cancelando jobs de usuarios con /tmp excesivo..."
         cancelled_count=0
         
-        # Procesar cada job que excede tiempo
-        {% for job_line in long_running_jobs.stdout_lines %}
+        {% for job_line in all_jobs.stdout_lines %}
         jobid=$(echo "{{ job_line }}" | cut -d: -f1)
         jobuser=$(echo "{{ job_line }}" | cut -d: -f2)
         
-        # Verificar si el usuario es problemático
         is_problematic=0
         for puser in $problematic_users; do
           if [ "$jobuser" = "$puser" ]; then
@@ -147,7 +117,7 @@
         fi
         {% endfor %}
         
-        echo "CANCELLED_COUNT:$cancelled_count"
+        echo "Total cancelados: $cancelled_count"
       args:
         executable: /bin/bash
       register: cancel_result
@@ -160,7 +130,6 @@
           
     - name: Requeuear jobs restantes (usuarios limpios) con cambio de nodo
       shell: |
-        # Leer usuarios problemáticos
         problematic_users=""
         {% if problematic_users.stdout_lines | length > 0 %}
         {% for line in problematic_users.stdout_lines %}
@@ -171,12 +140,10 @@
         echo "♻️  Requeuing jobs de usuarios sin problemas..."
         requeued_count=0
         
-        # Procesar cada job que excede tiempo
-        {% for job_line in long_running_jobs.stdout_lines %}
+        {% for job_line in all_jobs.stdout_lines %}
         jobid=$(echo "{{ job_line }}" | cut -d: -f1)
         jobuser=$(echo "{{ job_line }}" | cut -d: -f2)
         
-        # Verificar si el usuario es problemático
         is_problematic=0
         for puser in $problematic_users; do
           if [ "$jobuser" = "$puser" ]; then
@@ -185,12 +152,10 @@
           fi
         done
         
-        # Solo requeue si NO es problemático
         if [ $is_problematic -eq 0 ]; then
           echo "  ✅ Requeuing job $jobid del usuario $jobuser"
           
           {% if alternative_node.stdout != "NO_ALTERNATIVE" %}
-          # Obtener comando del job
           job_script=$(scontrol show job $jobid | grep "Command=" | sed 's/.*Command=//')
           
           if [ ! -z "$job_script" ] && [ -f "$job_script" ]; then
@@ -200,7 +165,7 @@
             sbatch --nodelist={{ alternative_node.stdout }} "$job_script"
             requeued_count=$((requeued_count + 1))
           else
-            echo "    ⚠️  No se pudo obtener script, requeue normal"
+            echo "    Requeue normal (no se pudo obtener script)"
             scontrol requeue $jobid 2>/dev/null || true
           fi
           {% else %}
@@ -211,7 +176,7 @@
         fi
         {% endfor %}
         
-        echo "REQUEUED_COUNT:$requeued_count"
+        echo "Total requeued: $requeued_count"
       args:
         executable: /bin/bash
       register: requeue_result
@@ -236,8 +201,6 @@
       debug:
         msg:
           - "✅ PROCESO COMPLETADO en {{ hostname_full.stdout }}"
-          - "Jobs con tiempo excedido: {{ long_running_jobs.stdout_lines | length }}"
+          - "Jobs totales: {{ all_jobs.stdout_lines | length }}"
           - "Usuarios problemáticos: {{ problematic_users.stdout_lines | length }}"
-          - "Jobs cancelados: {{ cancel_result.stdout_lines | select('search', 'CANCELLED_COUNT') | first | default('CANCELLED_COUNT:0') | regex_replace('CANCELLED_COUNT:', '') }}"
-          - "Jobs requeued: {{ requeue_result.stdout_lines | select('search', 'REQUEUED_COUNT') | first | default('REQUEUED_COUNT:0') | regex_replace('REQUEUED_COUNT:', '') }}"
           - "Nodo destino: {{ alternative_node.stdout }}"
