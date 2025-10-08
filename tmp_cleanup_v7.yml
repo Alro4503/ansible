@@ -22,10 +22,46 @@
       register: hostname_full
       changed_when: false
       
+    - name: Verificar estado INICIAL del nodo
+      shell: |
+        sinfo -n {{ hostname_full.stdout }} -h -o "%t"
+      register: initial_node_state
+      changed_when: false
+      
+    - name: Mostrar estado inicial del nodo
+      debug:
+        msg: "Estado INICIAL de {{ hostname_full.stdout }}: {{ initial_node_state.stdout }}"
+      
     - name: DRÁINEO INMEDIATO DEL NODO (BLOQUEAR NUEVOS JOBS)
       shell: |
         scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Auto-requeue: mantenimiento programado"
       register: drain_result
+      failed_when: false
+      
+    - name: Esperar a que el dráineo se complete (máximo 30 segundos)
+      shell: |
+        echo "⏳ Esperando que el nodo entre en estado DRAIN completo..."
+        max_wait=30
+        count=0
+        while [ $count -lt $max_wait ]; do
+          state=$(sinfo -n {{ hostname_full.stdout }} -h -o "%t" 2>/dev/null)
+          echo "  Estado actual: $state (esperando 2s...)"
+          if [ "$state" = "drain" ]; then
+            echo "✅ Nodo completamente dreneado"
+            exit 0
+          elif [ "$state" = "drng" ]; then
+            sleep 2
+            count=$((count + 2))
+          else
+            echo "  Estado inesperado: $state - continuando espera"
+            sleep 2
+            count=$((count + 2))
+          fi
+        done
+        echo "⚠️  Timeout esperando por dráineo completo, continuando igualmente"
+        exit 0
+      register: drain_wait_result
+      changed_when: false
       failed_when: false
       
     - name: Verificar estado del dráineo
@@ -37,10 +73,6 @@
     - name: Mostrar estado del nodo después del dráineo
       debug:
         msg: "Estado del nodo {{ hostname_full.stdout }} después del dráineo: {{ node_state_after_drain.stdout }}"
-      
-    - name: Esperar 5 segundos para que Slurm procese el dráineo
-      pause:
-        seconds: 5
       
     - name: Detectar usuarios con archivos grandes en /tmp
       shell: |
@@ -109,7 +141,7 @@
       debug:
         msg: |
           🕒 INICIANDO PROCESO CON TIMEOUT
-          Nodo en estado DRAIN - No se aceptan nuevos jobs
+          Nodo en estado {{ node_state_after_drain.stdout }} - No se aceptan nuevos jobs
           Se esperará {{ wait_timeout_minutes }} minuto(s) para que los jobs existentes terminen normalmente
           Si no completan en ese tiempo, se procederá con requeue/cancelación
       when: all_jobs.stdout != "" and all_jobs.stdout_lines | length > 0
@@ -393,5 +425,7 @@
           "Uso inicial: {{ initial_usage.stdout_lines[-1] | default('N/A') }}"
           "Uso final: {{ final_usage.stdout_lines[-1] | default('N/A') }}"
           "=== ESTADO NODO ==="
+          "Estado inicial: {{ initial_node_state.stdout }}"
+          "Estado final: {{ final_node_state.stdout }}"
           "Nodo reactivado: {{ '✅ SÍ' if final_node_state.stdout == 'idle' or final_node_state.stdout == 'mix' or final_node_state.stdout == 'alloc' else '❌ NO - Estado: ' + final_node_state.stdout }}"
           {% endif %}
