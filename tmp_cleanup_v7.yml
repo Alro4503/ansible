@@ -401,7 +401,7 @@
         msg: |
           {% if all_jobs.stdout == "" or all_jobs.stdout_lines | length == 0 %}
           "✅ NO HABÍA JOBS - SOLO LIMPIEZA EJECUTADA"
-          "=== LIMPIEZA /TMP ==="
+          "=== LIMPIEZA $ /TMP ==="
           "Archivos eliminados: {{ old_files_count.stdout }}"
           "Directorios eliminados: {{ old_dirs_count.stdout }}"
           "Uso inicial: {{ initial_usage.stdout_lines[-1] | default('N/A') }}"
