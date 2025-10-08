@@ -16,11 +16,31 @@
       - "/tmp/snap-private-tmp*"
     
   tasks:
-    # === FASE 1: DETECCIÓN Y MONITOREO ===
+    # === FASE 1: DETECCIÓN Y DRÁINEO INMEDIATO ===
     - name: Obtener hostname completo
       command: hostname -f
       register: hostname_full
       changed_when: false
+      
+    - name: DRÁINEO INMEDIATO DEL NODO (BLOQUEAR NUEVOS JOBS)
+      shell: |
+        scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Auto-requeue: mantenimiento programado"
+      register: drain_result
+      failed_when: false
+      
+    - name: Verificar estado del dráineo
+      shell: |
+        sinfo -n {{ hostname_full.stdout }} -h -o "%t"
+      register: node_state_after_drain
+      changed_when: false
+      
+    - name: Mostrar estado del nodo después del dráineo
+      debug:
+        msg: "Estado del nodo {{ hostname_full.stdout }} después del dráineo: {{ node_state_after_drain.stdout }}"
+      
+    - name: Esperar 5 segundos para que Slurm procese el dráineo
+      pause:
+        seconds: 5
       
     - name: Detectar usuarios con archivos grandes en /tmp
       shell: |
@@ -67,7 +87,7 @@
       changed_when: false
       failed_when: false
       
-    - name: Verificar jobs en el nodo
+    - name: Verificar jobs en el nodo (DESPUÉS del dráineo)
       shell: |
         squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%T" 2>/dev/null || echo ""
       register: all_jobs
@@ -78,6 +98,7 @@
       debug:
         msg: |
           Nodo actual: {{ hostname_full.stdout }}
+          Estado del nodo: {{ node_state_after_drain.stdout }}
           Nodo alternativo: {{ alternative_node.stdout }}
           Jobs encontrados: {{ all_jobs.stdout_lines | length }}
           Usuarios problemáticos: {{ problematic_users.stdout_lines | length }}
@@ -88,7 +109,8 @@
       debug:
         msg: |
           🕒 INICIANDO PROCESO CON TIMEOUT
-          Se esperará {{ wait_timeout_minutes }} minuto(s) para que los jobs terminen normalmente
+          Nodo en estado DRAIN - No se aceptan nuevos jobs
+          Se esperará {{ wait_timeout_minutes }} minuto(s) para que los jobs existentes terminen normalmente
           Si no completan en ese tiempo, se procederá con requeue/cancelación
       when: all_jobs.stdout != "" and all_jobs.stdout_lines | length > 0
           
@@ -97,7 +119,7 @@
         timeout_seconds=$(( {{ wait_timeout_minutes }} * 60 ))
         end_time=$(( $(date +%s) + $timeout_seconds ))
         
-        echo "⏳ Esperando máximo {{ wait_timeout_minutes }} minuto(s)..."
+        echo "⏳ Esperando máximo {{ wait_timeout_minutes }} minuto(s) para jobs existentes..."
         
         while [ $(date +%s) -lt $end_time ]; do
           remaining_jobs=$(squeue -h -w {{ hostname_full.stdout }} -o "%i" 2>/dev/null | wc -l)
@@ -128,26 +150,7 @@
         - all_jobs.stdout != "" and all_jobs.stdout_lines | length > 0
         - wait_result.rc == 1  # Solo si timeout se alcanzó
 
-    # === FASE 3: DRAIN DEL NODO (solo si hay jobs pendientes después de timeout) ===
-    - name: DRAINEAR NODO (solo si timeout se alcanzó y hay jobs pendientes)
-      shell: |
-        scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Auto-requeue: timeout alcanzado, procesando jobs pendientes y limpieza"
-      register: drain_result
-      failed_when: false
-      when: 
-        - all_jobs.stdout != "" and all_jobs.stdout_lines | length > 0
-        - wait_result.rc == 1 
-        - remaining_jobs.stdout_lines | length > 0
-      
-    - name: Esperar que el drain se aplique
-      pause:
-        seconds: 5
-      when: 
-        - all_jobs.stdout != "" and all_jobs.stdout_lines | length > 0
-        - wait_result.rc == 1 
-        - remaining_jobs.stdout_lines | length > 0
-        
-    # === FASE 4: GESTIÓN DE JOBS (cancelación y requeue - solo si hay jobs pendientes) ===
+    # === FASE 3: GESTIÓN DE JOBS (cancelación y requeue - solo si hay jobs pendientes) ===
     - name: Cancelar jobs de usuarios problemáticos (después de timeout)
       shell: |
         problematic_users=""
@@ -264,7 +267,7 @@
         - wait_result.rc == 1 
         - remaining_jobs.stdout_lines | length > 0
 
-    # === FASE 5: LIMPIEZA AUTOMÁTICA DE /TMP (SIEMPRE SE EJECUTA) ===
+    # === FASE 4: LIMPIEZA AUTOMÁTICA DE /TMP (SIEMPRE SE EJECUTA) ===
     - name: Mostrar uso actual de /tmp antes de limpieza
       shell: df -h /tmp
       register: initial_usage
@@ -338,31 +341,23 @@
       when: old_dirs_count.stdout|int > 0
       failed_when: false
 
-    # === FASE 6: FINALIZACIÓN Y REACTIVACIÓN (solo si se dreneó) ===
+    # === FASE 5: FINALIZACIÓN Y REACTIVACIÓN ===
     - name: Mostrar uso final de /tmp después de limpieza
       shell: df -h /tmp
       register: final_usage
       changed_when: false
       
-    - name: Reactivar nodo (SOLO si fue dreneado) - CORREGIDO
+    - name: Reactivar nodo - CORREGIDO
       shell: |
         scontrol update NodeName={{ hostname_full.stdout }} State=IDLE
       register: resume_result
       failed_when: false
-      when: 
-        - all_jobs.stdout != "" and all_jobs.stdout_lines | length > 0
-        - wait_result.rc == 1 
-        - remaining_jobs.stdout_lines | length > 0
       
     - name: Verificar estado final del nodo
       shell: |
         sinfo -n {{ hostname_full.stdout }} -h -o "%t"
       register: final_node_state
       changed_when: false
-      when: 
-        - all_jobs.stdout != "" and all_jobs.stdout_lines | length > 0
-        - wait_result.rc == 1 
-        - remaining_jobs.stdout_lines | length > 0
       
     - name: Limpiar archivo temporal de usuarios problemáticos
       file:
