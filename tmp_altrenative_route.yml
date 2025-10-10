@@ -1,0 +1,250 @@
+---
+- name: Limpieza automática de /tmp con control de espacio seguro
+  hosts: all
+  become: yes
+  gather_facts: no
+  vars:
+    ansible_become_exe: "sudo -n"
+    ansible_become_flags: ""
+    mtime_days: 1
+    # Directorio temporal en RAM - SEGURO
+    custom_temp_dir: "/dev/shm/ansible_cleanup"
+    systemd_paths:
+      - "/tmp/systemd-*"
+      - "/tmp/.font-unix*"
+      - "/tmp/.ICE-unix*" 
+      - "/tmp/.Test-unix*"
+      - "/tmp/.X11-unix*"
+      - "/tmp/.XIM-unix*"
+      - "/tmp/snap-private-tmp*"
+    
+  tasks:
+    - name: Verificar espacio disponible en /dev/shm
+      shell: |
+        df /dev/shm --output=avail | tail -1
+      register: shm_available
+      changed_when: false
+
+    - name: Verificar espacio mínimo requerido (100MB)
+      fail:
+        msg: "Espacio insuficiente en /dev/shm. Disponible: {{ shm_available.stdout }}KB, Requerido: 102400KB"
+      when: shm_available.stdout | int < 102400
+
+    - name: Crear directorio temporal seguro
+      file:
+        path: "{{ custom_temp_dir }}"
+        state: directory
+        mode: '0700'
+      environment:
+        TMPDIR: "{{ custom_temp_dir }}"
+        TEMP: "{{ custom_temp_dir }}"
+
+    - name: Obtener hostname completo
+      command: hostname -f
+      register: hostname_full
+      changed_when: false
+      environment:
+        TMPDIR: "{{ custom_temp_dir }}"
+        TEMP: "{{ custom_temp_dir }}"
+
+    - name: Verificar jobs corriendo en SLURM
+      shell: |
+        squeue -h -w {{ hostname_full.stdout }} 2>/dev/null | wc -l
+      register: running_jobs
+      changed_when: false
+      failed_when: false
+      environment:
+        TMPDIR: "{{ custom_temp_dir }}"
+        TEMP: "{{ custom_temp_dir }}"
+
+    - name: Mostrar jobs corriendo (si hay)
+      shell: |
+        squeue -w {{ hostname_full.stdout }}
+      when: running_jobs.stdout | int > 0
+      register: job_list
+      changed_when: false
+      environment:
+        TMPDIR: "{{ custom_temp_dir }}"
+        TEMP: "{{ custom_temp_dir }}"
+      
+    - name: Drainear nodo si hay jobs activos
+      shell: |
+        scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Limpieza /tmp automática" 2>/dev/null || true
+      when: running_jobs.stdout | int > 0
+      register: drain_result
+      changed_when: drain_result.rc == 0
+      failed_when: false
+      environment:
+        TMPDIR: "{{ custom_temp_dir }}"
+        TEMP: "{{ custom_temp_dir }}"
+
+    - name: Esperar a que terminen los jobs (máximo 12 horas)
+      shell: |
+        squeue -h -w {{ hostname_full.stdout }} 2>/dev/null | wc -l
+      register: jobs_check
+      until: jobs_check.stdout | int == 0
+      retries: 1440
+      delay: 30
+      when: running_jobs.stdout | int > 0
+      environment:
+        TMPDIR: "{{ custom_temp_dir }}"
+        TEMP: "{{ custom_temp_dir }}"
+
+    - name: Buscar archivos antiguos para eliminar
+      shell: |
+        find /tmp -maxdepth 1 -type f -mtime +{{ mtime_days }} \
+        ! -name "*.time" \
+        ! -name "aquota.user" \
+        ! -name "aquota.group" \
+        ! -name "krb5cc*" \
+        ! -path "/tmp/systemd-*" \
+        ! -path "/tmp/.font-unix*" \
+        ! -path "/tmp/.ICE-unix*" \
+        ! -path "/tmp/.Test-unix*" \
+        ! -path "/tmp/.X11-unix*" \
+        ! -path "/tmp/.XIM-unix*" \
+        ! -path "/tmp/snap-private-tmp*" | wc -l
+      register: old_files_count
+      changed_when: false
+      environment:
+        TMPDIR: "{{ custom_temp_dir }}"
+        TEMP: "{{ custom_temp_dir }}"
+
+    - name: Eliminar archivos antiguos (si los hay)
+      shell: |
+        find /tmp -maxdepth 1 -type f -mtime +{{ mtime_days }} \
+        ! -name "*.time" \
+        ! -name "aquota.user" \
+        ! -name "aquota.group" \
+        ! -name "krb5cc*" \
+        ! -path "/tmp/systemd-*" \
+        ! -path "/tmp/.font-unix*" \
+        ! -path "/tmp/.ICE-unix*" \
+        ! -path "/tmp/.Test-unix*" \
+        ! -path "/tmp/.X11-unix*" \
+        ! -path "/tmp/.XIM-unix*" \
+        ! -path "/tmp/snap-private-tmp*" \
+        -delete 2>/dev/null || true
+      when: old_files_count.stdout | int > 0
+      register: delete_files_result
+      changed_when: delete_files_result.rc == 0
+      failed_when: false
+      environment:
+        TMPDIR: "{{ custom_temp_dir }}"
+        TEMP: "{{ custom_temp_dir }}"
+
+    - name: Buscar directorios antiguos para eliminar
+      shell: |
+        find /tmp -maxdepth 1 -type d -mtime +{{ mtime_days }} \
+        ! -path "/tmp/systemd-*" \
+        ! -path "/tmp/.font-unix*" \
+        ! -path "/tmp/.ICE-unix*" \
+        ! -path "/tmp/.Test-unix*" \
+        ! -path "/tmp/.X11-unix*" \
+        ! -path "/tmp/.XIM-unix*" \
+        ! -path "/tmp/snap-private-tmp*" \
+        ! -path "/tmp" | wc -l
+      register: old_dirs_count
+      changed_when: false
+      environment:
+        TMPDIR: "{{ custom_temp_dir }}"
+        TEMP: "{{ custom_temp_dir }}"
+
+    - name: Eliminar directorios antiguos (si los hay)
+      shell: |
+        find /tmp -maxdepth 1 -type d -mtime +{{ mtime_days }} \
+        ! -path "/tmp/systemd-*" \
+        ! -path "/tmp/.font-unix*" \
+        ! -path "/tmp/.ICE-unix*" \
+        ! -path "/tmp/.Test-unix*" \
+        ! -path "/tmp/.X11-unix*" \
+        ! -path "/tmp/.XIM-unix*" \
+        ! -path "/tmp/snap-private-tmp*" \
+        ! -path "/tmp" \
+        -exec rmdir {} + 2>/dev/null || true
+      when: old_dirs_count.stdout | int > 0
+      register: delete_dirs_result
+      changed_when: delete_dirs_result.rc == 0
+      failed_when: false
+      environment:
+        TMPDIR: "{{ custom_temp_dir }}"
+        TEMP: "{{ custom_temp_dir }}"
+
+    - name: Verificar estado actual del nodo en SLURM
+      shell: |
+        scontrol show node {{ hostname_full.stdout }} 2>/dev/null | grep State || echo "State=UNKNOWN"
+      when: running_jobs.stdout | int > 0
+      register: node_state
+      changed_when: false
+      environment:
+        TMPDIR: "{{ custom_temp_dir }}"
+        TEMP: "{{ custom_temp_dir }}"
+
+    - name: Reactivar nodo si estaba en DRAIN
+      shell: |
+        if scontrol show node {{ hostname_full.stdout }} 2>/dev/null | grep -q "State=DRAIN"; then
+          scontrol update NodeName={{ hostname_full.stdout }} State=RESUME 2>/dev/null
+          echo "Nodo reactivado"
+        else
+          echo "Nodo no requiere reactivación"
+        fi
+      when: running_jobs.stdout | int > 0
+      register: resume_result
+      changed_when: 
+        - running_jobs.stdout | int > 0
+        - "'reactivado' in resume_result.stdout"
+      failed_when: false
+      environment:
+        TMPDIR: "{{ custom_temp_dir }}"
+        TEMP: "{{ custom_temp_dir }}"
+
+    - name: Mostrar uso actual de /tmp
+      shell: |
+        df -h /tmp | tail -1
+      register: final_usage
+      changed_when: false
+      environment:
+        TMPDIR: "{{ custom_temp_dir }}"
+        TEMP: "{{ custom_temp_dir }}"
+
+    - name: Monitorear uso de espacio temporal
+      shell: |
+        du -sh {{ custom_temp_dir }} 2>/dev/null || echo "0"
+      register: temp_usage
+      changed_when: false
+
+    - name: LIMPIEZA FINAL GARANTIZADA
+      block:
+        - name: Eliminar directorio temporal
+          file:
+            path: "{{ custom_temp_dir }}"
+            state: absent
+          
+        - name: Verificar eliminación completa
+          shell: |
+            if [ -d "{{ custom_temp_dir }}" ]; then
+              exit 1
+            else
+              echo "OK"
+            fi
+          register: cleanup_check
+          changed_when: false
+          failed_when: cleanup_check.rc != 0
+          
+      always:
+        - name: Limpieza de emergencia (por si falla algo)
+          file:
+            path: "{{ custom_temp_dir }}"
+            state: absent
+          when: cleanup_check is not defined or cleanup_check.rc != 0
+
+    - name: Resultado final de la limpieza
+      debug:
+        msg:
+          - "✅ Limpieza completada en {{ hostname_full.stdout }}"
+          - "📊 Jobs iniciales encontrados: {{ running_jobs.stdout }}"
+          - "🗑️  Archivos eliminados: {{ old_files_count.stdout }}"
+          - "📁 Directorios eliminados: {{ old_dirs_count.stdout }}"
+          - "🔄 Estado final del nodo: {{ node_state.stdout | default('OK') | regex_replace('.*State=(.*)', '\\1') }}"
+          - "💾 Uso final de /tmp: {{ final_usage.stdout }}"
+          - "📦 Espacio temporal máximo usado: {{ temp_usage.stdout }}"

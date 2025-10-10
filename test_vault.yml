@@ -1,0 +1,46 @@
+# test_vault.yml
+---
+- name: Test conexión con vault
+  hosts: all
+  gather_facts: no
+  
+  tasks:
+    - name: Cargar vault manualmente
+      include_vars:
+        file: vault.yml
+        name: loaded_vars
+
+    - name: Acceder a la variable correcta
+      set_fact:
+        bioinf_credentials: "{{ loaded_vars.bioinf_credentials }}"
+
+    - name: Extraer solo la IP del nombre del host
+      set_fact:
+        host_ip: "{{ inventory_hostname.split(' - ')[1] }}"
+
+    - name: Cargar credenciales específicas para cada host
+      set_fact:
+        ansible_user: "{{ bioinf_credentials[host_ip].user }}"
+        ansible_ssh_pass: "{{ bioinf_credentials[host_ip].password }}"
+        ansible_become_pass: "{{ bioinf_credentials[host_ip].password }}"
+
+    - name: Probar conexión básica
+      ansible.builtin.ping:
+
+    - name: Comprobar sudo
+      become: yes
+      command: whoami
+      register: sudo_check
+      changed_when: false
+      ignore_errors: yes
+      
+    - name: Mostrar resultados
+      debug:
+        msg: |
+          {{ inventory_hostname }}:
+          ✅ Conexión SSH: OK
+          {% if sudo_check is succeeded %}
+          ✅ Sudo: OK (usuario: {{ sudo_check.stdout }})
+          {% else %}
+          ❌ Sudo: FALLIDO
+          {% endif %}

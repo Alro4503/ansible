@@ -1,0 +1,88 @@
+---
+- name: Actualizar Nextflow en nodos donde existe
+  hosts: all
+  gather_facts: no
+  
+  tasks:
+    # 1. CARGAR CREDENCIALES DESDE VAULT
+    - name: Cargar vault manualmente
+      include_vars:
+        file: vault.yml
+        name: loaded_vars
+
+    - name: Acceder a las credenciales
+      set_fact:
+        bioinf_credentials: "{{ loaded_vars.bioinf_credentials }}"
+
+    - name: Extraer IP para buscar en vault
+      set_fact:
+        host_ip: "{{ inventory_hostname.split(' - ')[1] }}"
+
+    - name: Configurar credenciales para este host
+      set_fact:
+        ansible_user: "{{ bioinf_credentials[host_ip].user }}"
+        ansible_ssh_pass: "{{ bioinf_credentials[host_ip].password }}"
+        ansible_become_pass: "{{ bioinf_credentials[host_ip].password }}"
+
+    # 2. VERIFICAR SI NEXTFLOW EXISTE
+    - name: Comprobar si nextflow está instalado
+      stat:
+        path: /usr/local/bin/nextflow
+      register: nextflow_exists
+      become: yes
+
+    # 3. VERIFICAR VERSIÓN ACTUAL ANTES
+    - name: Obtener versión actual de nextflow
+      command: nextflow -version
+      register: nextflow_version_before
+      ignore_errors: yes
+      become: yes
+      changed_when: false
+      when: nextflow_exists.stat.exists
+
+    # 4. ACTUALIZAR NEXTFLOW
+    - name: Ejecutar nextflow self-update
+      command: nextflow self-update
+      register: update_result
+      ignore_errors: yes
+      become: yes
+      when: nextflow_exists.stat.exists
+
+    # 5. APLICAR PERMISOS 777
+    - name: Aplicar permisos 777 al binario de nextflow
+      file:
+        path: /usr/local/bin/nextflow
+        mode: '0777'
+        state: file
+      become: yes
+      when: nextflow_exists.stat.exists
+      notify: Mostrar resumen final
+
+    # 6. VERIFICAR VERSIÓN DESPUÉS
+    - name: Obtener versión después de actualizar
+      command: nextflow -version
+      register: nextflow_version_after
+      ignore_errors: yes
+      become: yes
+      changed_when: false
+      when: nextflow_exists.stat.exists
+
+    # 7. EXTRAER SOLO LA VERSIÓN
+    - name: Extraer solo el número de versión
+      set_fact:
+        version_before_clean: "{{ nextflow_version_before.stdout | regex_search('version\\s+[\\d.]+') | default('N/A') }}"
+        version_after_clean: "{{ nextflow_version_after.stdout | regex_search('version\\s+[\\d.]+') | default('N/A') }}"
+        update_success: "{{ 'SI' if 'installation completed' in update_result.stdout else 'NO' }}"
+      when: nextflow_exists.stat.exists
+
+  handlers:
+    - name: Mostrar resumen final
+      debug:
+        msg: |
+          {{ inventory_hostname }}:
+          📦 Nextflow instalado: {{ 'SÍ' if nextflow_exists.stat.exists else 'NO' }}
+          🔄 Actualización intentada: {{ 'SÍ' if nextflow_exists.stat.exists else 'NO' }}
+          📜 Versión antes: {{ version_before_clean | default('N/A') }}
+          📜 Versión después: {{ version_after_clean | default('N/A') }}
+          🔒 Permisos 777: {{ 'APLICADOS' if nextflow_exists.stat.exists else 'NO' }}
+          ✅ Update exitoso: {{ update_success | default('N/A') }}

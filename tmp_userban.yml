@@ -1,0 +1,213 @@
+- name: Requeue automático CON DRÁINEO PREVIO y control de /tmp
+  hosts: all
+  become: yes
+  vars:
+    ansible_become_exe: "sudo -n"
+    tmp_size_limit_gb: 1
+    
+  tasks:
+    - name: Obtener hostname completo
+      command: hostname -f
+      register: hostname_full
+      changed_when: false
+      
+    - name: Detectar usuarios con archivos grandes en /tmp (versión mejorada)
+      shell: |
+        find /tmp -maxdepth 1 -type f -exec du -sk {} + 2>/dev/null | \
+        while read size file; do
+          owner=$(stat -c '%U' "$file" 2>/dev/null || echo "unknown")
+          if [ "$owner" != "unknown" ] && [ "$owner" != "root" ]; then
+            size_gb=$(echo "scale=2; $size / 1024 / 1024" | bc 2>/dev/null || echo "0")
+            over_limit=$(echo "$size_gb > {{ tmp_size_limit_gb }}" | bc 2>/dev/null || echo "0")
+            if [ "$over_limit" -eq 1 ]; then
+              echo "$owner $size_gb $file"
+            fi
+          fi
+        done | awk '{users[$1]+=$2} END {for (u in users) if (users[u] > {{ tmp_size_limit_gb }}) print u, users[u]}'
+      register: problematic_users
+      changed_when: false
+      failed_when: false
+      
+    - name: Mostrar usuarios problemáticos
+      debug:
+        msg: |
+          "⚠️  Usuarios con uso excesivo de /tmp (>{{ tmp_size_limit_gb }}GB): {{ problematic_users.stdout_lines }}"
+      
+    - name: Encontrar nodo alternativo
+      shell: |
+        sinfo -p short -h -o "%N" | tr ',' '\n' | grep -v {{ hostname_full.stdout }} | grep -v down | head -1 || echo "NO_ALTERNATIVE"
+      register: alternative_node
+      changed_when: false
+      
+    - name: Verificar jobs actuales ANTES del dráineo
+      shell: |
+        squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T" 2>/dev/null | wc -l
+      register: current_jobs_count
+      changed_when: false
+      
+    - name: DRÁINEO INMEDIATO del nodo
+      shell: |
+        echo "🔧 DRANEANDO NODO {{ hostname_full.stdout }} (Bloqueando nuevos jobs)..."
+        scontrol update NodeName={{ hostname_full.stdout }} State=DRAIN Reason="Auto-requeue maintenance"
+      register: drain_result
+      
+    - name: Verificar estado del dráineo
+      shell: |
+        sinfo -n {{ hostname_full.stdout }} -h -o "%t"
+      register: node_state
+      changed_when: false
+      
+    - name: Mostrar estado del nodo
+      debug:
+        msg: "Estado del nodo {{ hostname_full.stdout }}: {{ node_state.stdout }}"
+        
+    - name: Esperar 10 segundos para que Slurm procese el dráineo
+      pause:
+        seconds: 10
+        
+    - name: Verificar jobs DESPUÉS del dráineo
+      shell: |
+        squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j:%T:%N"
+      register: running_jobs
+      changed_when: false
+      failed_when: false
+      
+    - name: Mostrar jobs encontrados
+      debug:
+        msg: |
+          "Jobs en {{ hostname_full.stdout }} después del dráineo:"
+          "{{ running_jobs.stdout_lines }}"
+        
+    - name: Salir si no hay jobs después del dráineo
+      debug:
+        msg: "✅ No hay jobs en {{ hostname_full.stdout }} después del dráineo - nada que hacer"
+      when: running_jobs.stdout == "" or running_jobs.stdout_lines | length == 0
+      
+    - name: Procesar jobs si los hay
+      block:
+        - name: Extraer lista de usuarios problemáticos
+          set_fact:
+            problematic_users_list: "{{ problematic_users.stdout_lines | map('regex_replace', '^(\\S+).*', '\\1') | list }}"
+          when: problematic_users.stdout_lines | length > 0
+          
+        - name: Inicializar lista vacía si no hay usuarios problemáticos
+          set_fact:
+            problematic_users_list: []
+          when: problematic_users.stdout_lines | length == 0
+        
+        - name: CANCELAR jobs de usuarios problemáticos
+          shell: |
+            echo "🚫 CANCELANDO PERMANENTEMENTE jobs de usuarios problemáticos:"
+            {% if problematic_users_list | length > 0 %}
+            {% for user in problematic_users_list %}
+            echo "  Usuario: {{ user }}"
+            # Obtener jobs del usuario problemático
+            user_jobs=$(squeue -h -u {{ user }} -w {{ hostname_full.stdout }} -o "%i:%j" 2>/dev/null)
+            if [ ! -z "$user_jobs" ]; then
+              echo "$user_jobs" | while IFS=: read jobid jobname; do
+                echo "    🗑️  CANCELANDO Job $jobid ($jobname)"
+                scancel $jobid
+              done
+            else
+              echo "    ✅ No hay jobs activos para {{ user }}"
+            fi
+            {% endfor %}
+            {% else %}
+            echo "✅ No hay usuarios problemáticos - no se cancela ningún job"
+            {% endif %}
+          args:
+            executable: /bin/bash
+          register: cancel_result
+          
+        - name: Esperar 5 segundos para que se cancelen los jobs
+          pause:
+            seconds: 5
+          when: problematic_users_list | length > 0
+          
+        - name: Requeuear jobs restantes (SOLO usuarios no problemáticos)
+          shell: |
+            echo "🔄 REQUEUEANDO jobs de usuarios NO problemáticos..."
+            remaining_jobs=$(squeue -h -w {{ hostname_full.stdout }} -o "%i:%u:%j" 2>/dev/null)
+            
+            if [ -z "$remaining_jobs" ]; then
+              echo "✅ No hay jobs restantes para requeue"
+              exit 0
+            fi
+            
+            echo "Jobs restantes encontrados:"
+            echo "$remaining_jobs"
+            
+            echo "$remaining_jobs" | while IFS=: read jobid jobuser jobname; do
+              # Verificar si el usuario es problemático
+              is_problematic=0
+              {% for puser in problematic_users_list %}
+              if [ "{{ puser }}" = "$jobuser" ]; then
+                is_problematic=1
+              fi
+              {% endfor %}
+              
+              if [ $is_problematic -eq 1 ]; then
+                echo "⏭️  IGNORANDO job $jobid ($jobname) del usuario problemático $jobuser"
+              else
+                echo "✅ PROCESANDO job $jobid ($jobname) del usuario $jobuser"
+                {% if alternative_node.stdout != "NO_ALTERNATIVE" %}
+                  echo "  🚀 MOVIENDO a {{ alternative_node.stdout }}"
+                  # Guardar configuración del job antes de cancelar
+                  job_config=$(scontrol show job $jobid)
+                  if [ $? -eq 0 ]; then
+                    scancel $jobid
+                    sleep 2
+                    # Recrear el job con nuevo nodo (simplificado)
+                    echo "  📋 Recreando job en {{ alternative_node.stdout }}"
+                    scontrol show job $jobid | grep "Command=" | cut -d= -f2 | xargs -I {} sbatch --nodelist={{ alternative_node.stdout }} <<<'{}'
+                  else
+                    echo "  ❌ Error obteniendo configuración del job $jobid"
+                  fi
+                {% else %}
+                  echo "  🔄 REQUEUE NORMAL"
+                  scontrol requeue $jobid
+                {% endif %}
+              fi
+            done
+          args:
+            executable: /bin/bash
+          register: requeue_result
+          failed_when: false
+          
+        - name: Esperar 15 segundos para que se completen los requeues
+          pause:
+            seconds: 15
+          
+        - name: VERIFICAR que el nodo está vacío
+          shell: |
+            remaining_count=$(squeue -h -w {{ hostname_full.stdout }} -o "%i" 2>/dev/null | wc -l)
+            echo "$remaining_count"
+          register: remaining_jobs_count
+          changed_when: false
+          
+        - name: Mostrar resumen de jobs restantes
+          debug:
+            msg: "Jobs restantes en {{ hostname_full.stdout }}: {{ remaining_jobs_count.stdout }}"
+          
+        - name: REACTIVAR nodo (incluso si quedan jobs)
+          shell: |
+            echo "🔄 REACTIVANDO nodo {{ hostname_full.stdout }}..."
+            scontrol update NodeName={{ hostname_full.stdout }} State=RESUME
+          register: resume_result
+          
+        - name: Verificar estado final del nodo
+          shell: |
+            sinfo -n {{ hostname_full.stdout }} -h -o "%t"
+          register: final_node_state
+          changed_when: false
+          
+        - name: RESULTADO FINAL
+          debug:
+            msg:
+              - "🎯 REQUEUE COMPLETADO en {{ hostname_full.stdout }}"
+              - "📊 Jobs iniciales: {{ current_jobs_count.stdout }}"
+              - "🚫 Usuarios problemáticos: {{ problematic_users_list }}"
+              - "🔄 Nodo destino: {{ alternative_node.stdout }}"
+              - "✅ Estado final: {{ final_node_state.stdout }}"
+              - "📋 Jobs restantes: {{ remaining_jobs_count.stdout }}"
+      when: running_jobs.stdout != "" and running_jobs.stdout_lines | length > 0
